@@ -75,6 +75,8 @@ if os.name == "nt":
     user32.GetWindowTextLengthW.restype = ctypes.c_int
     user32.GetWindowTextW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
     user32.GetWindowTextW.restype = ctypes.c_int
+    user32.GetClipboardSequenceNumber.argtypes = []
+    user32.GetClipboardSequenceNumber.restype = ctypes.c_uint
     user32.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
     user32.GetWindowThreadProcessId.restype = ctypes.c_ulong
     user32.SetForegroundWindow.argtypes = [ctypes.c_void_p]
@@ -199,6 +201,49 @@ def combo(vk):
     time.sleep(0.02)
     user32.keybd_event(vk, 0, KEYUP, 0)
     user32.keybd_event(VK_CONTROL, 0, KEYUP, 0)
+
+
+def clip_seq():
+    """剪贴板版本号：变了说明用户刚复制过"""
+    try:
+        return int(user32.GetClipboardSequenceNumber())
+    except Exception:
+        return 0
+
+
+def same_article_key(a, b):
+    try:
+        ua, ub = urlparse(a), urlparse(b)
+        if ua.path and ua.path == ub.path:
+            return True
+        return url_key(a) == url_key(b)
+    except Exception:
+        return a == b
+
+
+def history_title_for(url):
+    """本地浏览器历史里，这条链接的标题（很快，用来核对）"""
+    appdata = os.environ.get("LOCALAPPDATA", "")
+    patterns = [
+        os.path.join(appdata, "Google", "Chrome", "User Data", "*", "History"),
+        os.path.join(appdata, "Microsoft", "Edge", "User Data", "*", "History"),
+        os.path.join(appdata, "BraveSoftware", "Brave-Browser", "User Data", "*", "History"),
+    ]
+    for pat in patterns:
+        for path in glob.glob(pat):
+            try:
+                uri = "file:%s?mode=ro&immutable=1" % path.replace("\\", "/")
+                con = sqlite3.connect(uri, uri=True, timeout=2)
+                rows = con.execute(
+                    "SELECT url, title FROM urls WHERE url LIKE '%mp.weixin.qq.com%' "
+                    "ORDER BY last_visit_time DESC LIMIT 300").fetchall()
+                con.close()
+            except Exception:
+                continue
+            for u, t in rows:
+                if t and same_article_key(u, url):
+                    return t
+    return ""
 
 
 def clip_get(max_try=5):
@@ -371,6 +416,8 @@ class Floater:
         self.fg_title = ""
         self.fg_proc = ""
         self.fg_ts = 0.0
+        self.clip_seq_seen = 0
+        self.clip_seq_ts = 0.0
         self.idle_job = None
         self.anim_size = COLLAPSED
 
@@ -462,7 +509,14 @@ class Floater:
         self.root.after(20000, self.refresh_badge)
 
     def track_foreground(self):
-        """持续记住「用户正在看的那个窗口」，点击时才知道该去问谁要链接"""
+        """持续记住「用户正在看的那个窗口」和「剪贴板多久前变过」"""
+        try:
+            sq = clip_seq()
+            if sq != self.clip_seq_seen:
+                self.clip_seq_seen = sq
+                self.clip_seq_ts = time.time()
+        except Exception:
+            pass
         try:
             hwnd = user32.GetForegroundWindow()
             if hwnd:
@@ -620,13 +674,41 @@ class Floater:
             return
         self._capture(url, how)
 
+    def title_ok(self, url, label=""):
+        """剪贴板/历史里这条，和用户正看着的那篇是不是同一篇"""
+        win = norm_title(self.fg_title)
+        if len(win) < 6:
+            return True, ""
+        known = history_title_for(url)
+        got = norm_title(known)
+        if not got:
+            r = self.api("/api/peek", {"url": url}, timeout=25)
+            got = norm_title(r.get("title") or "") if r.get("ok") else ""
+        if not got:
+            log("title check %s: 拿不到标题，放行" % label)
+            return True, known
+        sim = SequenceMatcher(None, got, win).ratio()
+        log("title check %s: %r vs %r -> %.2f" % (label, got[:18], win[:18], sim))
+        return sim >= 0.55, known
+
     def find_url(self):
-        # 1) 剪贴板里已经有文章链接
+        stale_url, stale_title = "", ""
+
+        # 1) 剪贴板：要么是「刚复制的」，要么得和当前窗口标题对得上，否则就是上次剩下的旧链接
         clip = clip_get()
+        seq = clip_seq()
         hit = extract_article(clip)
         if hit:
-            log("clipboard hit")
-            return hit, "clipboard"
+            fresh_copy = (time.time() - self.clip_seq_ts) <= 15
+            if fresh_copy:
+                log("clipboard hit（刚复制过）")
+                return hit, "clipboard"
+            ok, known = self.title_ok(hit, "clipboard")
+            if ok:
+                log("clipboard hit（标题核对通过）")
+                return hit, "clipboard"
+            stale_url, stale_title = hit, known
+            log("剪贴板里是旧链接，跳过：%s" % hit)
 
         # 前台窗口超过 25 秒没更新，就当它已经过期，别去抢人家的焦点
         fresh = (time.time() - self.fg_ts) <= 25
@@ -658,25 +740,33 @@ class Floater:
             return address_url, "addressbar"
 
         # 4) 等你复制（微信客户端里的文章只能这么拿：复制链接）
-        log("fall through to waiting mode, fg=%s fresh=%s" % (self.fg_proc, fresh))
+        log("fall through to waiting mode, fg=%s fresh=%s stale=%s"
+            % (self.fg_proc, fresh, bool(stale_url)))
         self._set_mode("waiting")
-        self.root.after(0, lambda: self.toast(self.wait_hint()))
-        end = time.time() + 20
+        self.root.after(0, lambda: self.toast(self.wait_hint(stale_title)))
+        end = time.time() + 22
         while time.time() < end:
             time.sleep(0.3)
-            hit = extract_article(clip_get())
-            if hit:
-                log("clipboard during wait")
+            got = clip_get()
+            hit = extract_article(got)
+            if not hit:
+                continue
+            recent = (time.time() - self.clip_seq_ts) <= 15
+            if recent or self.title_ok(hit, "wait")[0]:
+                log("clipboard during wait（recent=%s）" % recent)
                 return hit, "waited"
 
         # 5) 手动
         self._set_mode("")
         return "", ""
 
-    def wait_hint(self):
+    def wait_hint(self, stale_title=""):
+        if stale_title:
+            short = stale_title if len(stale_title) <= 18 else stale_title[:18] + "…"
+            return "剪贴板里是《%s》，不是你正在看的这篇。复制当前文章链接，我在等（22 秒）" % short
         if self.fg_proc in WECHAT:
-            return "微信里的文章：点右上角 ⋯ →「复制链接」，我在等（20 秒）"
-        return "没读到链接：复制一下文章链接，我在等（20 秒）"
+            return "微信里的文章：点右上角 ⋯ →「复制链接」，我在等（22 秒）"
+        return "没读到链接：复制一下这篇文章的链接，我在等（22 秒）"
 
     def ask_manual(self):
         """兜底：自己弹一个小输入框，比 simpledialog 更好控置顶和焦点"""
@@ -685,14 +775,19 @@ class Floater:
         top.overrideredirect(True)
         top.attributes("-topmost", True)
         top.configure(bg=PAPER)
-        w, h = 430, 148
+        w, h = 430, 176
         x = max(8, self.rx - w)
         y = max(8, self.y - h - 100)
         top.geometry("%dx%d+%d+%d" % (w, h, x, y))
 
-        tk.Label(top, text="没读到当前页面的链接。把文章链接粘贴到这里：",
-                 bg=PAPER, fg=INK, font=("Microsoft YaHei UI", 10),
-                 wraplength=w - 28, justify="left").pack(anchor="w", padx=14, pady=(12, 6))
+        win = (self.fg_title or "").strip()
+        win = re.sub(r"\s*[-—]\s*[^-—]{1,12}$", "", win)[:46]
+        tip = "没读到当前页面的链接。"
+        if win:
+            tip += "\n（我认到的前台窗口是：《%s》）" % win
+        tk.Label(top, text=tip + "\n把文章链接粘贴到这里：",
+                 bg=PAPER, fg=INK, font=("Microsoft YaHei UI", 9),
+                 wraplength=w - 28, justify="left").pack(anchor="w", padx=14, pady=(10, 4))
         var = tk.StringVar(value=(clip_get() or "").strip()[:400])
         ent = tk.Entry(top, textvariable=var, font=("Microsoft YaHei UI", 10),
                        bg="#FFFFFF", fg=INK, relief="solid", bd=1)

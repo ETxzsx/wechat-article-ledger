@@ -788,6 +788,7 @@ def do_write_many(path, items, mode="shift"):
 # ---------------------------------------------------------------- 链接池
 
 POOL_LOCK = threading.Lock()
+PEEK_CACHE = {}
 
 
 def load_pool():
@@ -1112,6 +1113,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.api_pool_update()
             if p == "/api/pool/write":
                 return self.api_pool_write()
+            if p == "/api/peek":
+                return self.api_peek()
             if p == "/api/capture":
                 return self.api_capture()
             if p == "/api/floating/hello":
@@ -1438,6 +1441,26 @@ class Handler(BaseHTTPRequestHandler):
         res["skipped"] = skipped
         res["written"] = sum(1 for r in res["results"] if r.get("ok"))
         return self._json(res)
+
+    def api_peek(self):
+        """只抓一个标题，用来核对「剪贴板里这条到底是不是当前这篇」"""
+        body = self._read_json()
+        url = normalize_url(body.get("url", ""))
+        problem = article_url_problem(url)
+        if problem:
+            return self._json({"ok": False, "error": problem}, 400)
+        key = link_key(url)
+        hit = PEEK_CACHE.get(key)
+        if hit and time.time() - hit[0] < 600:
+            return self._json({"ok": True, "url": url, "title": hit[1], "cached": True})
+        try:
+            page = fetch_html(url)
+            info = parse_article(page)
+            title = info.get("title", "")
+            PEEK_CACHE[key] = (time.time(), title)
+            return self._json({"ok": True, "url": url, "title": title})
+        except Exception as e:
+            return self._json({"ok": False, "error": str(e)}, 502)
 
     def api_capture(self):
         body = self._read_json()
