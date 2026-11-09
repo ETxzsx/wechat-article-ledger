@@ -28,6 +28,7 @@ import time
 import tkinter as tk
 import urllib.request
 from difflib import SequenceMatcher
+from capture_policy import article_key, title_matches
 from urllib.parse import urlparse, parse_qs
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -212,13 +213,8 @@ def clip_seq():
 
 
 def same_article_key(a, b):
-    try:
-        ua, ub = urlparse(a), urlparse(b)
-        if ua.path and ua.path == ub.path:
-            return True
-        return url_key(a) == url_key(b)
-    except Exception:
-        return a == b
+    ka, kb = article_key(a), article_key(b)
+    return bool(ka and kb and ka == kb)
 
 
 def history_title_for(url):
@@ -497,6 +493,11 @@ class Floater:
                                              headers={"Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 return json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            try:
+                return json.loads(e.read().decode("utf-8"))
+            except Exception:
+                return {"ok": False, "error": "HTTP %s" % e.code}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
@@ -651,8 +652,10 @@ class Floater:
 
     # ---------------- 抓取
     def on_grab(self):
-        if self.mode == "busy":
+        if self.mode:
             return
+        self.capture_context = {"hwnd": self.fg_hwnd, "title": self.fg_title,
+                                "proc": self.fg_proc, "ts": self.fg_ts}
         self.mode = "busy"
         self.draw()
         log("grab: fg=%s title=%r" % (self.fg_proc, self.fg_title[:60]))
@@ -669,95 +672,65 @@ class Floater:
             log("find_url failed: %r" % (e,))
             url, how = "", ""
         if not url:
-            self._set_mode("")
+            self._set_mode("confirm")
             self.root.after(0, lambda: self.ask_manual())
             return
         self._capture(url, how)
 
     def title_ok(self, url, label=""):
-        """剪贴板/历史里这条，和用户正看着的那篇是不是同一篇"""
-        win = norm_title(self.fg_title)
-        if len(win) < 6:
-            return True, ""
-        known = history_title_for(url)
-        got = norm_title(known)
-        if not got:
-            r = self.api("/api/peek", {"url": url}, timeout=25)
-            got = norm_title(r.get("title") or "") if r.get("ok") else ""
-        if not got:
-            log("title check %s: 拿不到标题，放行" % label)
-            return True, known
-        sim = SequenceMatcher(None, got, win).ratio()
-        log("title check %s: %r vs %r -> %.2f" % (label, got[:18], win[:18], sim))
-        return sim >= 0.55, known
+        # Never consult browser history: its title may belong to a stale tab.
+        ctx = self.capture_context
+        r = self.api("/api/peek", {"url": url}, timeout=15)
+        title = r.get("title", "") if r.get("ok") else ""
+        ok = title_matches(ctx.get("title", ""), title)
+        log("candidate source=%s verified=%s" % (label, ok))
+        return ok, title
 
     def find_url(self):
-        stale_url, stale_title = "", ""
-
-        # 1) 剪贴板：要么是「刚复制的」，要么得和当前窗口标题对得上，否则就是上次剩下的旧链接
-        clip = clip_get()
-        seq = clip_seq()
-        hit = extract_article(clip)
-        if hit:
-            fresh_copy = (time.time() - self.clip_seq_ts) <= 15
-            if fresh_copy:
-                log("clipboard hit（刚复制过）")
-                return hit, "clipboard"
-            ok, known = self.title_ok(hit, "clipboard")
-            if ok:
-                log("clipboard hit（标题核对通过）")
-                return hit, "clipboard"
-            stale_url, stale_title = hit, known
-            log("剪贴板里是旧链接，跳过：%s" % hit)
-
-        # 前台窗口超过 25 秒没更新，就当它已经过期，别去抢人家的焦点
-        fresh = (time.time() - self.fg_ts) <= 25
-
-        # 2) 前台是浏览器：抢前景 + Ctrl+L / Ctrl+C 读地址栏
-        address_url = ""
-        if fresh and self.fg_proc in BROWSERS and self.fg_hwnd:
-            ok = force_foreground(self.fg_hwnd)
-            log("browser %s foreground=%s" % (self.fg_proc, ok))
-            try:
+        ctx = self.capture_context
+        hwnd = ctx.get("hwnd")
+        initial_seq = clip_seq()
+        checked = set()
+        fresh = time.time() - ctx.get("ts", 0) <= 5
+        # Copy only from the frozen, still-active browser target. Require a NEW
+        # clipboard sequence; a failed Ctrl+C must never reuse old clipboard text.
+        if fresh and ctx.get("proc") in BROWSERS and hwnd:
+            if force_foreground(hwnd) and user32.GetForegroundWindow() == hwnd:
+                before = clip_seq()
                 combo(VK_L)
-                time.sleep(0.18)
+                time.sleep(0.15)
                 combo(VK_C)
-                time.sleep(0.45)
-            except Exception as e:
-                log("key send failed: %s" % e)
-            address_url = extract_article(clip_get())
-            log("addressbar -> %r" % (address_url or "空"))
-
-        # 3) 用窗口标题去浏览器历史里找（标题才是「用户正在看哪篇」的硬证据）
-        hist_url = history_lookup(self.fg_title) if (fresh and self.fg_title) else ""
-
-        if hist_url and address_url and url_key(hist_url) != url_key(address_url):
-            log("addressbar=%s 与 history=%s 不一致，按标题取 history" % (address_url, hist_url))
-            return hist_url, "history"
-        if hist_url:
-            return hist_url, "history"
-        if address_url:
-            return address_url, "addressbar"
-
-        # 4) 等你复制（微信客户端里的文章只能这么拿：复制链接）
-        log("fall through to waiting mode, fg=%s fresh=%s stale=%s"
-            % (self.fg_proc, fresh, bool(stale_url)))
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline and clip_seq() == before:
+                    time.sleep(0.05)
+                if clip_seq() != before and user32.GetForegroundWindow() == hwnd:
+                    candidate = extract_article(clip_get())
+                    if candidate and article_key(candidate):
+                        checked.add(candidate)
+                        if self.title_ok(candidate, "addressbar")[0]:
+                            return candidate, "addressbar"
+        # A copied link, even if copied a millisecond ago, still needs a title match.
+        candidate = extract_article(clip_get())
+        if fresh and candidate and candidate not in checked and article_key(candidate):
+            checked.add(candidate)
+            if self.title_ok(candidate, "clipboard")[0]:
+                return candidate, "clipboard"
+        # No silent history fallback. Wait only for a clipboard CHANGE after this click.
         self._set_mode("waiting")
-        self.root.after(0, lambda: self.toast(self.wait_hint(stale_title)))
-        end = time.time() + 22
-        while time.time() < end:
-            time.sleep(0.3)
-            got = clip_get()
-            hit = extract_article(got)
-            if not hit:
+        self.root.after(0, lambda: self.toast("当前页面尚未核实。请复制当前文章链接；旧剪贴板和浏览历史不会自动入池。"))
+        last_seq = clip_seq()
+        deadline = time.monotonic() + 22
+        while time.monotonic() < deadline:
+            time.sleep(0.2)
+            seq = clip_seq()
+            if seq == last_seq:
                 continue
-            recent = (time.time() - self.clip_seq_ts) <= 15
-            if recent or self.title_ok(hit, "wait")[0]:
-                log("clipboard during wait（recent=%s）" % recent)
-                return hit, "waited"
-
-        # 5) 手动
-        self._set_mode("")
+            last_seq = seq
+            candidate = extract_article(clip_get())
+            if candidate and article_key(candidate):
+                if self.title_ok(candidate, "waited")[0]:
+                    return candidate, "waited"
+                break
         return "", ""
 
     def wait_hint(self, stale_title=""):
@@ -825,7 +798,8 @@ class Floater:
 
     def _capture(self, url, how):
         self._set_mode("busy")
-        r = self.api("/api/capture", {"url": url, "source": "floating", "title_hint": self.fg_title},
+        r = self.api("/api/capture", {"url": url, "source": "floating", "title_hint": self.capture_context.get("title", ""),
+                                             "explicit_confirm": how == "manual"},
                      timeout=45)
         self.root.after(0, lambda: self._after_capture(r, url, how))
 
@@ -834,7 +808,10 @@ class Floater:
         if not r.get("ok"):
             err = str(r.get("error") or "抓取失败")
             log("capture failed: %s" % err)
-            self.toast("抓取失败：" + err[:38], err=True)
+            self.toast("抓取未入池：" + err[:38], err=True)
+            if r.get("needs_confirmation"):
+                self.mode = "confirm"
+                self.root.after(0, self.ask_manual)
             self.draw()
             return
         item = r.get("item") or {}

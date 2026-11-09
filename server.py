@@ -10,6 +10,7 @@
 import io
 import json
 from difflib import SequenceMatcher
+from capture_policy import article_key, automatic_allowed
 import os
 import re
 import sys
@@ -153,38 +154,11 @@ def norm_title(t):
 
 
 def article_url_problem(url):
-    """返回 '' 表示是一篇推文的链接；否则返回人话原因"""
-    if not url:
-        return "没有链接"
-    if "mp.weixin.qq.com" not in url:
-        return "这不是微信公众号的链接（应为 https://mp.weixin.qq.com/s/…）"
-    try:
-        u = urlparse(url if url.startswith("http") else "https://" + url)
-    except Exception:
-        return "链接格式不对"
-    if not u.netloc.endswith("mp.weixin.qq.com"):
-        return "这不是微信公众号的链接"
-    path = u.path or "/"
-    if path.startswith("/s/"):
-        if len(path) <= 4:
-            return "链接不完整，像是从中间截断的"
-        return ""
-    if path in ("/s", "/s/"):
-        q = parse_qs(u.query)
-        if "__biz" in q or "mid" in q or "sn" in q:
-            return ""
-        return "这是公众号首页/搜索结果，不是某一篇文章"
-    if path.startswith("/mp/"):
-        return "这是公众号主页或合集页，不是某一篇文章；请打开文章本身再复制链接"
-    return "这不是单篇推文的地址（%s）" % path
+    return "" if article_key(url) else "请输入完整的公众号单篇文章链接，不使用主页、合集或截断链接。"
 
 
 def link_key(url):
-    """同一篇文章的不同链接形式归一到同一个 key，用来去重"""
-    u = urlparse(normalize_url(url))
-    if u.path.startswith("/s/") and u.path.strip("/") != "s":
-        return u.path.rstrip("/")
-    return (u.path or "/") + ("?" + u.query if u.query else "")
+    return article_key(url) or normalize_url(url)
 
 
 def extract_links(text):
@@ -839,8 +813,9 @@ def pool_add(pool, item):
     existing = pool_find(pool, item["url"])
     if existing:
         keep_written = existing.get("written")
+        keep_id = existing["id"]
         existing.update(item)
-        existing["id"] = existing.get("id") or item["id"]
+        existing["id"] = keep_id
         existing["written"] = keep_written
         return existing, False
     pool["items"].insert(0, item)
@@ -947,7 +922,12 @@ def floater_alive(pid):
             import ctypes
             PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
             STILL_ACTIVE = 259
-            h = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+            k = ctypes.windll.kernel32
+            k.OpenProcess.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.c_uint]
+            k.OpenProcess.restype = ctypes.c_void_p
+            k.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+            k.CloseHandle.argtypes = [ctypes.c_void_p]
+            h = k.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
             if not h:
                 return False
             try:
@@ -1478,15 +1458,19 @@ class Handler(BaseHTTPRequestHandler):
             item = make_item(parsed, url, body.get("source") or "floating")
             if not item["title"] and parsed.get("warnings"):
                 item["status"] = "partial"
+            # Validate BEFORE touching the pool, not after inserting the wrong article.
+            explicit = body.get("explicit_confirm") is True
+            hint = body.get("title_hint", "")
+            if not automatic_allowed(hint, item.get("title", ""), explicit):
+                return self._json({"ok": False, "needs_confirmation": True,
+                                   "error": "当前窗口与文章标题未核实，已停止自动入池，请核对标题后确认。",
+                                   "candidate_title": item.get("title", ""),
+                                   "expected_title": hint}, 409)
             with POOL_LOCK:
                 pool = load_pool()
                 saved, is_new = pool_add(pool, item)
                 save_pool(pool)
-            hint = norm_title(body.get("title_hint", ""))
-            got = norm_title(item.get("title", ""))
             mismatch = False
-            if hint and got and len(hint) >= 6:
-                mismatch = SequenceMatcher(None, hint, got).ratio() < 0.55
             log_history({"action": "capture", "url": url, "source": body.get("source"),
                          "title_hint": body.get("title_hint", ""), "mismatch": mismatch})
             return self._json({"ok": True, "item": item, "new": is_new, "mismatch": mismatch,
