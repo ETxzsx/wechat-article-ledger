@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.pyo
+config.json
+data/
+backups/
+logs/
+台账/
+*.saving
+*.tmp
+.DS_Store
+Thumbs.db
