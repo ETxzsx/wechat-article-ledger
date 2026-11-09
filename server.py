@@ -9,6 +9,7 @@
 """
 import io
 import json
+from difflib import SequenceMatcher
 import os
 import re
 import sys
@@ -27,7 +28,7 @@ import urllib.request
 import urllib.error
 from copy import copy
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse, unquote, parse_qs
 
 from openpyxl import load_workbook
 from openpyxl.styles import Font, Alignment, Border
@@ -119,6 +120,63 @@ def normalize_url(url):
     if not re.match(r"^https?://", url, re.I):
         url = "https://" + url
     return url
+
+
+TITLE_SUFFIXES = [
+    " - google chrome", " - microsoft edge", " - chrome", " - edge", " - chromium",
+    " - 360安全浏览器", " - 360极速浏览器", " - 360se", " - qq浏览器", " - 搜狗高速浏览器",
+    " - firefox", " — mozilla firefox", " - mozilla firefox", " - opera", " - 微信",
+]
+
+
+def norm_title(t):
+    """窗口标题归一：零宽字符 / 「和另外 N 个页面」/ 「 - 个人」这类 profile 尾巴 / 浏览器名"""
+    t = (t or "").strip()
+    for ch in ("\u200b", "\u200c", "\u200d", "\ufeff", "\u2060"):
+        t = t.replace(ch, "")
+    low = t.lower()
+    for s in TITLE_SUFFIXES:
+        if low.endswith(s):
+            t = t[: len(t) - len(s)]
+            low = t.lower()
+            break
+    for _ in range(3):
+        before = t
+        t = re.sub(r"\s*[-—|]?\s*和另外\s*\d+\s*个页面\s*$", "", t)
+        t = re.sub(r"\s*(?:[-—]\s*)?(?:and\s*)?\d+\s*more\s*pages?\s*$", "", t, flags=re.I)
+        m = re.search(r"\s[-—]\s([^-—]{1,8})$", t)
+        if m and len(t) - len(m.group(0)) >= 8:
+            t = t[: len(t) - len(m.group(0))]
+        if t == before:
+            break
+    return re.sub(r"[\s\W_]+", "", t)
+
+
+def article_url_problem(url):
+    """返回 '' 表示是一篇推文的链接；否则返回人话原因"""
+    if not url:
+        return "没有链接"
+    if "mp.weixin.qq.com" not in url:
+        return "这不是微信公众号的链接（应为 https://mp.weixin.qq.com/s/…）"
+    try:
+        u = urlparse(url if url.startswith("http") else "https://" + url)
+    except Exception:
+        return "链接格式不对"
+    if not u.netloc.endswith("mp.weixin.qq.com"):
+        return "这不是微信公众号的链接"
+    path = u.path or "/"
+    if path.startswith("/s/"):
+        if len(path) <= 4:
+            return "链接不完整，像是从中间截断的"
+        return ""
+    if path in ("/s", "/s/"):
+        q = parse_qs(u.query)
+        if "__biz" in q or "mid" in q or "sn" in q:
+            return ""
+        return "这是公众号首页/搜索结果，不是某一篇文章"
+    if path.startswith("/mp/"):
+        return "这是公众号主页或合集页，不是某一篇文章；请打开文章本身再复制链接"
+    return "这不是单篇推文的地址（%s）" % path
 
 
 def link_key(url):
@@ -465,7 +523,7 @@ def shift_down(ws, at_row, count=1, blank_ref=None):
 
 
 def _sheet_sort_key(name):
-    m = re.match(r"(d{4})年(d{1,2})月", name)
+    m = re.match(r"(\d{4})年(\d{1,2})月", name)
     return (int(m.group(1)), int(m.group(2))) if m else (9999, 99)
 
 
@@ -880,12 +938,25 @@ def write_runtime(data):
 
 
 def floater_alive(pid):
+    """用 Win32 直接问进程还在不在，别用 tasklist（会闪一个黑框、抢焦点）"""
     if not pid:
         return False
     try:
-        out = subprocess.run(["tasklist", "/FI", "PID eq %d" % int(pid)],
-                             capture_output=True, timeout=8)
-        return str(pid) in out.stdout.decode("gbk", "ignore")
+        if os.name == "nt":
+            import ctypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            STILL_ACTIVE = 259
+            h = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+            if not h:
+                return False
+            try:
+                code = ctypes.c_ulong()
+                ok = ctypes.windll.kernel32.GetExitCodeProcess(h, ctypes.byref(code))
+                return bool(ok) and code.value == STILL_ACTIVE
+            finally:
+                ctypes.windll.kernel32.CloseHandle(h)
+        os.kill(int(pid), 0)
+        return True
     except Exception:
         return False
 
@@ -930,7 +1001,7 @@ def stop_floater():
 # ---------------------------------------------------------------- HTTP
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "WeChatLedger/1.1"
+    server_version = "WeChatLedger/1.2"
 
     def log_message(self, fmt, *args):
         try:
@@ -1108,9 +1179,9 @@ class Handler(BaseHTTPRequestHandler):
         url = normalize_url(body.get("url", ""))
         if not url:
             return self._json({"ok": False, "error": "请先粘贴公众号文章链接"}, 400)
-        if "mp.weixin.qq.com" not in url:
-            return self._json({"ok": False,
-                               "error": "这看起来不是微信公众号文章链接（应为 https://mp.weixin.qq.com/s/...）"}, 400)
+        problem = article_url_problem(url)
+        if problem:
+            return self._json({"ok": False, "error": problem}, 400)
         try:
             page = fetch_html(url)
         except urllib.error.HTTPError as e:
@@ -1370,11 +1441,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_capture(self):
         body = self._read_json()
-        urls = extract_links(body.get("url", "")) or (
-            [normalize_url(body.get("url", ""))] if body.get("url") else [])
+        raw = body.get("url", "") or ""
+        urls = extract_links(raw) or ([normalize_url(raw)] if raw else [])
         if not urls:
             return self._json({"ok": False, "error": "没有识别到公众号链接"}, 400)
         url = urls[0]
+        problem = article_url_problem(url)
+        if problem:
+            return self._json({"ok": False, "error": problem}, 400)
         try:
             page = fetch_html(url)
             parsed = parse_article(page)
@@ -1385,7 +1459,14 @@ class Handler(BaseHTTPRequestHandler):
                 pool = load_pool()
                 saved, is_new = pool_add(pool, item)
                 save_pool(pool)
-            return self._json({"ok": True, "item": item, "new": is_new,
+            hint = norm_title(body.get("title_hint", ""))
+            got = norm_title(item.get("title", ""))
+            mismatch = False
+            if hint and got and len(hint) >= 6:
+                mismatch = SequenceMatcher(None, hint, got).ratio() < 0.55
+            log_history({"action": "capture", "url": url, "source": body.get("source"),
+                         "title_hint": body.get("title_hint", ""), "mismatch": mismatch})
+            return self._json({"ok": True, "item": item, "new": is_new, "mismatch": mismatch,
                                "pending": sum(1 for it in load_pool()["items"] if not it.get("written"))})
         except Exception as e:
             return self._json({"ok": False, "error": str(e)}, 502)
