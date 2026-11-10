@@ -538,6 +538,8 @@ async function loadPool() {
   clearTimeout(S.pollTimer);
   if (S.job.running) {
     S.pollTimer = setTimeout(loadPool, 1200);
+  } else if (S.view === "pool") {
+    S.pollTimer = setTimeout(loadPool, 3000);   // 池页面自动刷新，接入 C++ 记录器的新链接
   }
 }
 

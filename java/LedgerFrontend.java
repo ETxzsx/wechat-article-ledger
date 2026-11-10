@@ -35,16 +35,21 @@ public class LedgerFrontend {
     static final List<Map<String, Object>> pool = new ArrayList<>();
     static final Object LOCK = new Object();
 
-    public static void main(String[] args) throws Exception {
-        // 控制台统一 UTF-8，避免中文乱码
-        System.setOut(new PrintStream(new FileOutputStream(FileDescriptor.out), true, StandardCharsets.UTF_8));
+    /** 初始化路径（JavaFX 与命令行两种启动方式共用） */
+    public static void init() throws Exception {
+        try {
+            System.setOut(new PrintStream(new FileOutputStream(FileDescriptor.out), true, StandardCharsets.UTF_8));
+        } catch (Exception ignored) { /* javaw 无控制台时忽略 */ }
         baseDir = Paths.get(System.getProperty("app.dir", ".")).toAbsolutePath().normalize();
         webDir = baseDir.resolve("web");
         dataDir = baseDir.resolve("data").resolve("frontend");
         ledgerCsv = dataDir.resolve("ledger.csv");
         poolJson = dataDir.resolve("pool.json");
         Files.createDirectories(dataDir);
+    }
 
+    /** 启动本地服务 + C++ 链接增量同步线程 */
+    public static void startServer() throws Exception {
         loadPool();
         importCppLinks();
 
@@ -54,6 +59,33 @@ public class LedgerFrontend {
         server.setExecutor(java.util.concurrent.Executors.newFixedThreadPool(4));
         server.start();
 
+        startCppTailer();
+    }
+
+    static volatile long cppLastMod = -1;
+
+    /** 每 2 秒盯一次 C++ 记录器的产出，新链接自动并进链接池 */
+    static void startCppTailer() {
+        Thread t = new Thread(() -> {
+            Path cpp = baseDir.resolve("cpp").resolve("data").resolve("wechat_links.jsonl");
+            while (true) {
+                try { Thread.sleep(2000); } catch (InterruptedException e) { return; }
+                try {
+                    if (!Files.isRegularFile(cpp)) continue;
+                    long m = Files.getLastModifiedTime(cpp).toMillis();
+                    if (m == cppLastMod) continue;
+                    cppLastMod = m;
+                    importCppLinks();
+                } catch (Exception ignored) {}
+            }
+        });
+        t.setDaemon(true);
+        t.start();
+    }
+
+    public static void main(String[] args) throws Exception {
+        init();
+        startServer();
         String url = "http://127.0.0.1:" + PORT + "/";
         System.out.println("==================================================");
         System.out.println("  推文台账 · Java 前端");

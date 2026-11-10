@@ -173,16 +173,25 @@ GET  /api/ping
 
 
 
-## 前端（Java 版）
+## 桌面软件（C++ 记录器 + Java 界面）
 
-双击 `启动前端.cmd`，用内置 JRE 起一个本地服务并打开界面 —— **界面与网页版完全一致**（同一套 `web/` 页面），零安装 Java 依赖。
+双击 `启动软件.cmd` —— 打开一个桌面窗口，界面与网页版完全一致（同一套 `web/` 页面，JavaFX WebView 渲染）。
 
-- **链接池**：自动并入 C++ 记录器抓到的链接（读 `cpp\data\wechat_links.jsonl`），也可以手动粘贴/导入链接；点标题可当场补全字段。
-- **单条录入**：粘贴链接自动解析标题、公众号、发布时间、文末署名（Java 实现，HTTP + 正则）。
-- **台账明细**：写入 `data\frontend\ledger.csv`（Excel 可直接打开），序号自动编号。
-- **技术栈**：纯 JDK 21 标准库（`com.sun.net.httpserver`），无第三方依赖；`jlink` 精简 JRE 约 44 MB。
+**两个程序合成一个软件**：
 
-源码：`java\LedgerFrontend.java`。
+| 组件 | 角色 |
+| --- | --- |
+| `cpp\wechat_link_watcher.exe` | 后台引擎：浏览器历史 + 全局剪贴板自动抓链接（无窗口，日志写 `cpp\data\watcher.log`） |
+| `java\DesktopApp` | 桌面窗口：JavaFX 界面 + 本地服务（端口 8780） |
+
+- Java 启动时**自动拉起** C++ 记录器；关闭窗口时**一起退出**（不留孤儿进程）。
+- C++ 每抓到一条链接写入 `cpp\data\wechat_links.jsonl`，Java 每 2 秒增量同步，链接池页面每 3 秒自动刷新 —— 复制链接后 3~5 秒就能在界面里看到。
+- 链接池里可以补字段、批量写入台账；台账落在 `data\frontend\ledger.csv`（Excel 可直接打开）。
+- 单条录入会真实抓取文章（标题/公众号/发布时间/文末署名）。
+
+**技术栈**：C++（MSVC 静态编译，无运行库依赖）+ Java 21（JDK 标准库 `com.sun.net.httpserver` + JavaFX 21，内置 jlink 精简 JRE 与 JavaFX SDK，解压即用，无需安装任何环境）。
+
+源码：`cpp\wechat_link_watcher.cpp`、`java\LedgerFrontend.java`、`java\DesktopApp.java`。
 
 ## License
 

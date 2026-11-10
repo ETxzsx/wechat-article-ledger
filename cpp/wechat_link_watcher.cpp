@@ -536,10 +536,27 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 // ---------------- 主程序 ----------------
 int main() {
+    // 单实例：多开时第二个直接退出，避免重复记录
+    HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Global\\WeChatLinkWatcherSingleInstance");
+    if (mutex && GetLastError() == ERROR_ALREADY_EXISTS) {
+        return 0;
+    }
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
     setvbuf(stdout, nullptr, _IONBF, 0);
     SetConsoleCtrlHandler(ctrl_handler, TRUE);
+
+    // 无控制台运行时（由 Java 拉起），把 stdout 重定向到日志文件
+    {
+        std::error_code ec0;
+        fs::path d = exe_dir() / L"data";
+        fs::create_directories(d, ec0);
+        std::wstring logPath = (d / L"watcher.log").wstring();
+        FILE* fp = nullptr;
+        if (_wfreopen_s(&fp, logPath.c_str(), L"a", stdout) != 0) {
+            // 重定向失败也不影响核心功能
+        }
+    }
 
     printf("================================================\n");
     printf("  公众号链接自动记录器 (C++ · 全电脑)\n");
