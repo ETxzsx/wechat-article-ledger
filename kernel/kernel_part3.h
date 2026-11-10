@@ -3,6 +3,7 @@
 struct Config {
     wstring dataDir;
     wstring ledgerName = L"推文台账.xlsx";
+    wstring ledgerPath;      // 用户选择的 Excel 台账
 };
 static Config g_cfg;
 static HWND g_floater = nullptr;
@@ -21,18 +22,24 @@ static void LoadConfig() {
             if (!d.empty()) g_cfg.dataDir = u2w(d);
             string l = j->str("ledgerName");
             if (!l.empty()) g_cfg.ledgerName = u2w(l);
+            string lp = j->str("ledgerPath");
+            if (!lp.empty()) g_cfg.ledgerPath = u2w(lp);
         }
     }
     MakeDirs(g_cfg.dataDir);
 }
 static void SaveConfig() {
     string s = "{\"dataDir\":" + JStr(w2u(g_cfg.dataDir)) +
-               ",\"ledgerName\":" + JStr(w2u(g_cfg.ledgerName)) + "}";
+               ",\"ledgerName\":" + JStr(w2u(g_cfg.ledgerName)) +
+               ",\"ledgerPath\":" + JStr(w2u(g_cfg.ledgerPath)) + "}";
     WriteFileU8(ConfigPath(), s);
 }
 static wstring PoolFile() { return PathJoin(g_cfg.dataDir, L"pool.json"); }
 static wstring LedgerFile() { return PathJoin(g_cfg.dataDir, L"ledger.json"); }
-static wstring LedgerXlsx() { return PathJoin(g_cfg.dataDir, g_cfg.ledgerName); }
+static wstring LedgerXlsx() {
+    if (!g_cfg.ledgerPath.empty()) return g_cfg.ledgerPath;
+    return PathJoin(g_cfg.dataDir, g_cfg.ledgerName);
+}
 
 static string ItemToJson(const Item& it) {
     string s = "{";
@@ -149,8 +156,11 @@ static Item MakeItem(const string& url, const Article& a, const string& source) 
     return it;
 }
 
+static bool ExcelWriteRow(const wstring& xlsx, const string& sheet, const string& mode, int row,
+                          const vector<string>& values, string& err, int& outRow);   // 实现在 part5
+
 // ==================== 写台账 ====================
-static bool AppendToLedger(const Item& it, string& err) {
+static bool AppendToLedger(const Item& it, string& err, const string& mode = "append", int row = 0) {
     vector<string> miss;
     for (int i = 0; i < 13; ++i) {
         if (IsRequired(kKeys[i]) && it.Get(kKeys[i]).empty()) miss.push_back(kHeads[i]);
@@ -159,12 +169,27 @@ static bool AppendToLedger(const Item& it, string& err) {
         err = "资料不全";
         return false;
     }
-    g_ledger.push_back(it);
+    vector<string> vals;
+    for (int i = 0; i < 13; ++i) vals.push_back(it.Get(kKeys[i]));
+    int sameMonth = 0;
+    string ym = YearMonthOf(it.date);
+    for (auto& r : g_ledger) if (YearMonthOf(r.date) == ym) ++sameMonth;
+    if (!vals.empty() && vals[0].empty()) vals[0] = to_string(sameMonth + 1);
+
+    int outRow = 0;
+    string wErr;
+    bool ok = ExcelWriteRow(LedgerXlsx(), YearMonthOf(it.date), mode, row, vals, wErr, outRow);
+    if (!ok) {
+        KLog("excel write failed: " + wErr);
+        err = wErr;
+        return false;
+    }
+    Item rec = it;
+    rec.seqValue = vals[0];
+    rec.wsheet = YearMonthOf(rec.date); rec.wrow = outRow;
+    g_ledger.push_back(rec);
     g_ledger.back().written = true;
-    KLog("ledger append, total=" + to_string(g_ledger.size()));
     SaveList(LedgerFile(), g_ledger);
-    KLog("ledger.json saved");
-    bool ok = BuildLedgerXlsx(LedgerXlsx(), g_ledger);
-    KLog(string("xlsx built=") + (ok ? "1" : "0"));
+    KLog("ledger appended to excel row=" + to_string(outRow));
     return true;
 }

@@ -235,6 +235,7 @@ struct Item {
     string id, url, title, account, date, type, theme;
     string writer, layout, photo, review, art, secretary;
     string source, created;
+    string seqValue;
     bool written = false;
     string wsheet; int wrow = 0;
     string Get(const string& k) const {
@@ -243,6 +244,7 @@ struct Item {
         if (k=="theme") return theme; if (k=="writer") return writer; if (k=="layout") return layout;
         if (k=="photo") return photo; if (k=="review") return review; if (k=="art") return art;
         if (k=="secretary") return secretary; if (k=="source") return source; if (k=="created") return created;
+        if (k=="seq") return seqValue;
         return "";
     }
     void Set(const string& k, const string& v) {
@@ -659,6 +661,7 @@ static bool BuildLedgerXlsx(const wstring& outPath, const vector<Item>& rows) {
 struct Config {
     wstring dataDir;
     wstring ledgerName = L"推文台账.xlsx";
+    wstring ledgerPath;      // 用户选择的 Excel 台账
 };
 static Config g_cfg;
 static HWND g_floater = nullptr;
@@ -677,18 +680,24 @@ static void LoadConfig() {
             if (!d.empty()) g_cfg.dataDir = u2w(d);
             string l = j->str("ledgerName");
             if (!l.empty()) g_cfg.ledgerName = u2w(l);
+            string lp = j->str("ledgerPath");
+            if (!lp.empty()) g_cfg.ledgerPath = u2w(lp);
         }
     }
     MakeDirs(g_cfg.dataDir);
 }
 static void SaveConfig() {
     string s = "{\"dataDir\":" + JStr(w2u(g_cfg.dataDir)) +
-               ",\"ledgerName\":" + JStr(w2u(g_cfg.ledgerName)) + "}";
+               ",\"ledgerName\":" + JStr(w2u(g_cfg.ledgerName)) +
+               ",\"ledgerPath\":" + JStr(w2u(g_cfg.ledgerPath)) + "}";
     WriteFileU8(ConfigPath(), s);
 }
 static wstring PoolFile() { return PathJoin(g_cfg.dataDir, L"pool.json"); }
 static wstring LedgerFile() { return PathJoin(g_cfg.dataDir, L"ledger.json"); }
-static wstring LedgerXlsx() { return PathJoin(g_cfg.dataDir, g_cfg.ledgerName); }
+static wstring LedgerXlsx() {
+    if (!g_cfg.ledgerPath.empty()) return g_cfg.ledgerPath;
+    return PathJoin(g_cfg.dataDir, g_cfg.ledgerName);
+}
 
 static string ItemToJson(const Item& it) {
     string s = "{";
@@ -805,8 +814,11 @@ static Item MakeItem(const string& url, const Article& a, const string& source) 
     return it;
 }
 
+static bool ExcelWriteRow(const wstring& xlsx, const string& sheet, const string& mode, int row,
+                          const vector<string>& values, string& err, int& outRow);   // 实现在 part5
+
 // ==================== 写台账 ====================
-static bool AppendToLedger(const Item& it, string& err) {
+static bool AppendToLedger(const Item& it, string& err, const string& mode = "append", int row = 0) {
     vector<string> miss;
     for (int i = 0; i < 13; ++i) {
         if (IsRequired(kKeys[i]) && it.Get(kKeys[i]).empty()) miss.push_back(kHeads[i]);
@@ -815,18 +827,34 @@ static bool AppendToLedger(const Item& it, string& err) {
         err = "资料不全";
         return false;
     }
-    g_ledger.push_back(it);
+    vector<string> vals;
+    for (int i = 0; i < 13; ++i) vals.push_back(it.Get(kKeys[i]));
+    int sameMonth = 0;
+    string ym = YearMonthOf(it.date);
+    for (auto& r : g_ledger) if (YearMonthOf(r.date) == ym) ++sameMonth;
+    if (!vals.empty() && vals[0].empty()) vals[0] = to_string(sameMonth + 1);
+
+    int outRow = 0;
+    string wErr;
+    bool ok = ExcelWriteRow(LedgerXlsx(), YearMonthOf(it.date), mode, row, vals, wErr, outRow);
+    if (!ok) {
+        KLog("excel write failed: " + wErr);
+        err = wErr;
+        return false;
+    }
+    Item rec = it;
+    rec.seqValue = vals[0];
+    rec.wsheet = YearMonthOf(rec.date); rec.wrow = outRow;
+    g_ledger.push_back(rec);
     g_ledger.back().written = true;
-    KLog("ledger append, total=" + to_string(g_ledger.size()));
     SaveList(LedgerFile(), g_ledger);
-    KLog("ledger.json saved");
-    bool ok = BuildLedgerXlsx(LedgerXlsx(), g_ledger);
-    KLog(string("xlsx built=") + (ok ? "1" : "0"));
+    KLog("ledger appended to excel row=" + to_string(outRow));
     return true;
 }
 
 
 static string ApiLive();   // 实现在 part5
+static wstring PickLedgerFile(HWND owner);   // 实现在 part5
 
 // ==================== 静态文件 ====================
 static string ContentTypeOf(const string& name) {
@@ -1034,7 +1062,11 @@ static string ApiPoolWrite(const string& body) {
         if (arr && arr->t == JVal::ARR) { hasIds = true; for (auto& e : arr->arr) if (e && e->t == JVal::STR) ids.insert(e->s); }
     }
     bool fillSlash = (j && j->t == JVal::OBJ) ? j->truthy("fillSlash") : false;
+    string mode = (j && j->t == JVal::OBJ) ? j->str("mode", "append") : "append";
+    int startRow = 0;
+    { auto rr = (j && j->t == JVal::OBJ) ? j->get("row") : nullptr; if (rr && rr->t == JVal::NUM) startRow = (int)rr->n; }
     int written = 0, skipped = 0;
+    string lastErr;
     lock_guard<mutex> lk(g_mu);
     for (auto& it : g_pool) {
         if (it.written) continue;
@@ -1055,13 +1087,13 @@ static string ApiPoolWrite(const string& body) {
             if (bad) { ++skipped; continue; }
         }
         string err;
-        if (AppendToLedger(v, err)) { it.written = true; ++written; }
-        else ++skipped;
+        if (AppendToLedger(v, err, mode, startRow)) { it.written = true; ++written; }
+        else { ++skipped; if (!err.empty() && err != "资料不全") lastErr = err; }
     }
     SaveList(PoolFile(), g_pool);
     return "{\"ok\":" + string(written > 0 ? "true" : "false") + ",\"written\":" + to_string(written) +
            ",\"skipped\":" + to_string(skipped) + ",\"error\":" +
-           JStr(written == 0 ? "没有可写入的条目（多半是资料不全）" : "") + "}";
+           JStr(written == 0 ? (lastErr.empty() ? "没有可写入的条目（多半是资料不全）" : lastErr) : "") + "}";
 }
 
 static string ApiAppend(const string& body) {
@@ -1074,9 +1106,15 @@ static string ApiAppend(const string& body) {
         auto v = vals->get(kKeys[i]);
         if (v && v->t == JVal::STR) it.Set(kKeys[i], v->s);
     }
+    string wmode = j->str("mode", "append");
+    int wrow = 0;
+    { auto rr = j->get("row"); if (rr && rr->t == JVal::NUM) wrow = (int)rr->n; }
     string err;
-    if (!AppendToLedger(it, err)) return "{\"ok\":false,\"error\":\"还有必填项没填\"}";
-    return "{\"ok\":true,\"sheet\":\"\",\"row\":" + to_string((int)g_ledger.size() + 1) + ",\"seq\":" + to_string((int)g_ledger.size()) + "}";
+    if (!AppendToLedger(it, err, wmode, wrow)) return "{\"ok\":false,\"error\":" + JStr(err.empty() ? "写入失败" : err) + "}";
+    int realRow = g_ledger.empty() ? 0 : g_ledger.back().wrow;
+    int realSeq = g_ledger.empty() ? 0 : atoi(g_ledger.back().Get("seq").c_str());
+    return "{\"ok\":true,\"sheet\":" + JStr(YearMonthOf(it.date)) + ",\"row\":" + to_string(realRow) +
+           ",\"seq\":" + to_string(realSeq) + "}";
 }
 
 static string ApiConfig(const string& body) {
@@ -1141,14 +1179,31 @@ static string HandleApi(const string& method, const string& rawPath, const strin
     if (path == "/api/pool/fetch") return ApiExtract(body);
     if (path == "/api/append") return ApiAppend(body);
     if (path == "/api/config") return ApiConfig(body);
-    if (path == "/api/pick-folder" || path == "/api/pick-file") return ApiPickFolder();
+    if (path == "/api/pick-folder") return ApiPickFolder();
+    if (path == "/api/pick-file") {
+        wstring picked = PickLedgerFile(g_floater);
+        if (picked.empty()) return "{\"ok\":false,\"cancelled\":true}";
+        lock_guard<mutex> lk(g_mu);
+        g_cfg.ledgerPath = picked;
+        SaveConfig();
+        return "{\"ok\":true,\"workbook\":" + JStr(w2u(picked)) + "}";
+    }
     if (path == "/api/open-file") {
         ShellExecuteW(nullptr, L"open", LedgerXlsx().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         return "{\"ok\":true}";
     }
     if (path == "/api/floating/start" || path == "/api/floating/stop")
         return "{\"ok\":false,\"error\":\"悬浮窗已取消，请用「动态识别」页\"}";
-    if (path == "/api/preview") return "{\"ok\":true,\"sheet\":\"\",\"row\":" + to_string((int)g_ledger.size() + 2) + ",\"seq\":" + to_string((int)g_ledger.size() + 1) + ",\"occupied\":false}";
+    if (path == "/api/preview") {
+        JP pj = JParser(body).Parse();
+        string date = (pj && pj->t == JVal::OBJ) ? pj->str("date") : "";
+        string ym = YearMonthOf(date);
+        lock_guard<mutex> lk(g_mu);
+        int sameMonth = 0;
+        for (auto& r : g_ledger) if (YearMonthOf(r.date) == ym) ++sameMonth;
+        return "{\"ok\":true,\"sheet\":" + JStr(ym) + ",\"row\":" + to_string(sameMonth + 3) +
+               ",\"seq\":" + to_string(sameMonth + 1) + ",\"occupied\":false}";
+    }
     if (path == "/api/undo") return "{\"ok\":false,\"error\":\"暂不支持撤销\"}";
     return "{\"ok\":false,\"error\":\"unknown api\"}";
 }
@@ -1631,6 +1686,121 @@ static void LaunchUI() {
     if (ok) { CloseHandle(pi.hProcess); CloseHandle(pi.hThread); }
 }
 
+// ==================== Excel 写入（COM，保留原表格式） ====================
+static const char* kExcelPs = R"PS(param([string]$InputJson)
+$ErrorActionPreference = 'Stop'
+$req = Get-Content -LiteralPath $InputJson -Raw -Encoding UTF8 | ConvertFrom-Json
+$res = @{ ok = $false; error = ''; row = 0 }
+$app = $null
+try {
+    foreach ($id in @('KET.Application','Excel.Application')) {
+        try { $app = New-Object -ComObject $id; break } catch {}
+    }
+    if (-not $app) { throw 'no excel/wps' }
+    $app.Visible = $false
+    try { $app.DisplayAlerts = $false } catch {}
+    $wb = $app.Workbooks.Open($req.path)
+    try {
+        $ws = $null
+        foreach ($s in $wb.Worksheets) { if ($s.Name -eq $req.sheet) { $ws = $s; break } }
+        if (-not $ws) {
+            $ws = $wb.Worksheets.Add()
+            $ws.Name = $req.sheet
+            $h2 = @('序号','类型','推文名称','推文链接','推文主题','推文发布时间','文案撰写','运营排版','运营公众号','美工封面','秘书处整合、归档','摄影','审核')
+            for ($i=0; $i -lt $h2.Count; $i++) { $ws.Cells.Item(2, $i+1).Value2 = $h2[$i] }
+        }
+        $used = $ws.UsedRange
+        $lastRow = $used.Row + $used.Rows.Count - 1
+        if ($lastRow -lt 2) { $lastRow = 2 }
+        if ($req.mode -eq 'row') {
+            $target = [int]$req.row
+            if ($target -lt 3) { $target = $lastRow + 1 }
+            else { $ws.Rows.Item($target).Insert(-4121, 0) }
+        } else {
+            $target = $lastRow + 1
+        }
+        for ($i=0; $i -lt 13; $i++) {
+            $v = ''
+            if ($req.values.Count -gt $i) { $v = [string]$req.values[$i] }
+            $cell = $ws.Cells.Item($target, $i+1)
+            if ($i -eq 0) { $cell.NumberFormat = '0' } else { $cell.NumberFormat = '@' }
+            if ($v -ne '') { $cell.Value2 = $v }
+        }
+        $wb.Save()
+        $res.ok = $true
+        $res.row = $target
+    } finally {
+        try { $wb.Close($false) } catch {}
+    }
+} catch {
+    $res.error = [string]$_.Exception.Message
+} finally {
+    if ($app) { try { $app.Quit() } catch {} }
+}
+$res | ConvertTo-Json -Compress | Set-Content -LiteralPath $req.result -Encoding UTF8
+)PS";
+
+static bool ExcelWriteRow(const wstring& xlsx, const string& sheet, const string& mode, int row,
+                          const vector<string>& values, string& err, int& outRow) {
+    KLog("excel write: " + w2u(xlsx) + " sheet=" + sheet + " mode=" + mode + " row=" + to_string(row));
+    wstring dir = PathJoin(g_cfg.dataDir, L"tmp");
+    CreateDirectoryW(dir.c_str(), nullptr);
+    wstring script = PathJoin(dir, L"excel_write.ps1");
+    wstring reqFile = PathJoin(dir, L"write_req.json");
+    wstring resFile = PathJoin(dir, L"write_res.json");
+    WriteFileU8(script, string("\xEF\xBB\xBF") + kExcelPs);   // BOM，PowerShell 5.1 才认 UTF-8
+
+    string js = "{\"path\":" + JStr(w2u(xlsx)) + ",\"sheet\":" + JStr(sheet) +
+                ",\"mode\":" + JStr(mode) + ",\"row\":" + to_string(row) +
+                ",\"result\":" + JStr(w2u(resFile)) + ",\"values\":[";
+    for (size_t i = 0; i < values.size(); ++i) { if (i) js += ","; js += JStr(values[i]); }
+    js += "]}";
+    WriteFileU8(reqFile, js);
+
+    DeleteFileW(resFile.c_str());
+    wstring cmd = L"powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"" + script +
+                  L"\" -InputJson \"" + reqFile + L"\"";
+    STARTUPINFOW si{ sizeof(si) };
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(nullptr, (wchar_t*)cmd.c_str(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                        nullptr, dir.c_str(), &si, &pi)) {
+        err = "无法启动 PowerShell";
+        return false;
+    }
+    WaitForSingleObject(pi.hProcess, 60000);
+    CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+
+    string res = ReadFileU8(resFile);
+    if (res.size() >= 3 && (unsigned char)res[0] == 0xEF && (unsigned char)res[1] == 0xBB) res = res.substr(3);  // 去 BOM
+    if (res.empty()) { err = "Excel 无响应（可能未安装 Excel/WPS 或被占用）"; return false; }
+    JP j = JParser(res).Parse();
+    bool ok = j && j->t == JVal::OBJ ? j->truthy("ok") : false;
+    if (ok) {
+        auto rr = j->get("row");
+        outRow = (rr && rr->t == JVal::NUM) ? (int)rr->n : 0;
+        return true;
+    }
+    err = (j && j->t == JVal::OBJ) ? j->str("error", "写入失败") : "写入失败";
+    return false;
+}
+
+// ==================== 选择 Excel ====================
+static wstring PickLedgerFile(HWND owner) {
+    wchar_t buf[MAX_PATH]{};
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = owner;
+    ofn.lpstrFilter = L"Excel 台账 (*.xlsx;*.xlsm)\0*.xlsx;*.xlsm\0所有文件 (*.*)\0*.*\0";
+    ofn.lpstrFile = buf;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrTitle = L"选择要写入的 Excel 台账（13 列：序号/类型/推文名称/…/审核）";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+    if (!GetOpenFileNameW(&ofn)) return L"";
+    return buf;
+}
+
 // ==================== 入口 ====================
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     KLog("kernel start");
@@ -1645,6 +1815,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     g_webDir = PathJoin(g_exeDir, L"web");
 
     LoadConfig();
+    if (g_cfg.ledgerPath.empty() || !FileExists(g_cfg.ledgerPath)) {
+        wstring picked = PickLedgerFile(nullptr);
+        if (!picked.empty()) { g_cfg.ledgerPath = picked; SaveConfig(); KLog("ledger picked: " + w2u(picked)); }
+        else KLog("ledger not picked");
+    }
     LoadList(PoolFile(), g_pool);
     LoadList(LedgerFile(), g_ledger);
     bool sq = LoadSqlite();

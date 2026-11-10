@@ -101,12 +101,12 @@
               <div class="plan-row"><span>写入行</span><b id="plan-row">—</b></div>
               <div class="plan-row"><span>自动序号</span><b id="plan-seq">—</b></div>
             </div>
-            <label class="mini-label" for="mode">目标行已有内容时</label>
+            <label class="mini-label" for="mode">插入方式</label>
             <select id="mode">
-              <option value="shift">整行下移，原有内容不动</option>
-              <option value="next_empty">写到下一个空行</option>
-              <option value="overwrite">直接覆盖目标行</option>
+              <option value="append">接着顺序插入（追加到最后一行）</option>
+              <option value="row">插入到指定行（后面的行下移）</option>
             </select>
+            <input id="insert-row" type="number" min="3" placeholder="行号，例如 4" class="hidden-line">
             <p id="plan-warn" class="plan-warn hidden"></p>
             <button id="btn-write" class="btn btn-seal btn-block" type="button" disabled>写入台账</button>
             <div class="minor-actions">

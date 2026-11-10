@@ -13,7 +13,8 @@ const S = {
   rowsData: {},
   activeSheet: null,
   ledgerSheet: null,
-  mode: "shift",
+  mode: "append",
+  insertRow: 0,
   workbook: "",
   plan: null,
   busy: false,
@@ -442,21 +443,17 @@ async function updatePreview() {
     $("plan-warn").classList.add("hidden");
     return;
   }
-  const p = await api("/api/preview", { date, mode: S.mode });
+  const p = await api("/api/preview", { date });
   if (!p.ok) { $("plan-sheet").textContent = p.error || "无法计算"; return; }
   S.plan = p;
-  $("plan-sheet").textContent = p.sheet + (p.sheet_created ? "（将新建）" : "");
-  $("plan-row").textContent = "第 " + p.row + " 行";
-  $("plan-seq").textContent = "第 " + p.seq + " 条";
-  const warn = $("plan-warn");
-  if (p.occupied && p.occupied_cells && p.occupied_cells.length) {
-    const cells = p.occupied_cells.map((c) => c.cell + "「" + c.value + "」").join("、");
-    warn.textContent = "目标行已被占用：" + cells + "。" +
-      (S.mode === "shift" ? "写入时整行下移，原内容保留。" : S.mode === "next_empty" ? "将改写到下一个空行。" : "会被覆盖。");
-    warn.classList.remove("hidden");
+  $("plan-sheet").textContent = p.sheet || "（按发布时间自动判定）";
+  if (S.mode === "row") {
+    $("plan-row").textContent = S.insertRow ? "第 " + S.insertRow + " 行（插入，后续行下移）" : "请填行号";
   } else {
-    warn.classList.add("hidden");
+    $("plan-row").textContent = "第 " + p.row + " 行（追加）";
   }
+  $("plan-seq").textContent = "第 " + p.seq + " 条";
+  $("plan-warn").classList.add("hidden");
 }
 
 function applyMode() { $("mode").value = S.mode; }
@@ -478,7 +475,7 @@ async function doWrite() {
   S.fields.forEach((f) => { values[f.key] = (S.draft[f.key] || "").trim(); });
   values.date = cnDate(values.date);
   try {
-    const r = await api("/api/append", { values, mode: S.mode });
+    const r = await api("/api/append", { values, mode: S.mode, row: S.mode === "row" ? S.insertRow : 0 });
     if (!r.ok) { toast(r.error || "写入失败", true); return; }
     toast("已写入「" + r.sheet + "」第 " + r.row + " 行（序号 " + r.seq + "）");
     resetForm();
@@ -831,6 +828,7 @@ async function writePool(ids) {
     ids: list,
     fillSlash: $("fill-slash").checked,
     mode: S.mode,
+    row: S.mode === "row" ? S.insertRow : 0,
   });
   if (!r.ok) {
     const skip = (r.skipped || []).length;
@@ -866,7 +864,17 @@ function bind() {
   $("btn-parse").addEventListener("click", doParse);
   $("url").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); doParse(); } });
   $("btn-write").addEventListener("click", doWrite);
-  $("mode").addEventListener("change", (e) => { S.mode = e.target.value; updatePreview(); });
+  $("mode").addEventListener("change", (e) => {
+    S.mode = e.target.value;
+    const rowInput = $("insert-row");
+    rowInput.classList.toggle("hidden-line", S.mode !== "row");
+    if (S.mode === "row" && !rowInput.value) rowInput.value = "4";
+    updatePreview();
+  });
+  $("insert-row").addEventListener("input", (e) => {
+    S.insertRow = parseInt(e.target.value, 10) || 0;
+    updatePreview();
+  });
   $("btn-slash").addEventListener("click", () => {
     S.fields.forEach((f) => {
       if (f.required || f.key === "seq") return;

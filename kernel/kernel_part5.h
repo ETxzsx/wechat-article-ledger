@@ -476,6 +476,121 @@ static void LaunchUI() {
     if (ok) { CloseHandle(pi.hProcess); CloseHandle(pi.hThread); }
 }
 
+// ==================== Excel 写入（COM，保留原表格式） ====================
+static const char* kExcelPs = R"PS(param([string]$InputJson)
+$ErrorActionPreference = 'Stop'
+$req = Get-Content -LiteralPath $InputJson -Raw -Encoding UTF8 | ConvertFrom-Json
+$res = @{ ok = $false; error = ''; row = 0 }
+$app = $null
+try {
+    foreach ($id in @('KET.Application','Excel.Application')) {
+        try { $app = New-Object -ComObject $id; break } catch {}
+    }
+    if (-not $app) { throw 'no excel/wps' }
+    $app.Visible = $false
+    try { $app.DisplayAlerts = $false } catch {}
+    $wb = $app.Workbooks.Open($req.path)
+    try {
+        $ws = $null
+        foreach ($s in $wb.Worksheets) { if ($s.Name -eq $req.sheet) { $ws = $s; break } }
+        if (-not $ws) {
+            $ws = $wb.Worksheets.Add()
+            $ws.Name = $req.sheet
+            $h2 = @('序号','类型','推文名称','推文链接','推文主题','推文发布时间','文案撰写','运营排版','运营公众号','美工封面','秘书处整合、归档','摄影','审核')
+            for ($i=0; $i -lt $h2.Count; $i++) { $ws.Cells.Item(2, $i+1).Value2 = $h2[$i] }
+        }
+        $used = $ws.UsedRange
+        $lastRow = $used.Row + $used.Rows.Count - 1
+        if ($lastRow -lt 2) { $lastRow = 2 }
+        if ($req.mode -eq 'row') {
+            $target = [int]$req.row
+            if ($target -lt 3) { $target = $lastRow + 1 }
+            else { $ws.Rows.Item($target).Insert(-4121, 0) }
+        } else {
+            $target = $lastRow + 1
+        }
+        for ($i=0; $i -lt 13; $i++) {
+            $v = ''
+            if ($req.values.Count -gt $i) { $v = [string]$req.values[$i] }
+            $cell = $ws.Cells.Item($target, $i+1)
+            if ($i -eq 0) { $cell.NumberFormat = '0' } else { $cell.NumberFormat = '@' }
+            if ($v -ne '') { $cell.Value2 = $v }
+        }
+        $wb.Save()
+        $res.ok = $true
+        $res.row = $target
+    } finally {
+        try { $wb.Close($false) } catch {}
+    }
+} catch {
+    $res.error = [string]$_.Exception.Message
+} finally {
+    if ($app) { try { $app.Quit() } catch {} }
+}
+$res | ConvertTo-Json -Compress | Set-Content -LiteralPath $req.result -Encoding UTF8
+)PS";
+
+static bool ExcelWriteRow(const wstring& xlsx, const string& sheet, const string& mode, int row,
+                          const vector<string>& values, string& err, int& outRow) {
+    KLog("excel write: " + w2u(xlsx) + " sheet=" + sheet + " mode=" + mode + " row=" + to_string(row));
+    wstring dir = PathJoin(g_cfg.dataDir, L"tmp");
+    CreateDirectoryW(dir.c_str(), nullptr);
+    wstring script = PathJoin(dir, L"excel_write.ps1");
+    wstring reqFile = PathJoin(dir, L"write_req.json");
+    wstring resFile = PathJoin(dir, L"write_res.json");
+    WriteFileU8(script, string("\xEF\xBB\xBF") + kExcelPs);   // BOM，PowerShell 5.1 才认 UTF-8
+
+    string js = "{\"path\":" + JStr(w2u(xlsx)) + ",\"sheet\":" + JStr(sheet) +
+                ",\"mode\":" + JStr(mode) + ",\"row\":" + to_string(row) +
+                ",\"result\":" + JStr(w2u(resFile)) + ",\"values\":[";
+    for (size_t i = 0; i < values.size(); ++i) { if (i) js += ","; js += JStr(values[i]); }
+    js += "]}";
+    WriteFileU8(reqFile, js);
+
+    DeleteFileW(resFile.c_str());
+    wstring cmd = L"powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"" + script +
+                  L"\" -InputJson \"" + reqFile + L"\"";
+    STARTUPINFOW si{ sizeof(si) };
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(nullptr, (wchar_t*)cmd.c_str(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                        nullptr, dir.c_str(), &si, &pi)) {
+        err = "无法启动 PowerShell";
+        return false;
+    }
+    WaitForSingleObject(pi.hProcess, 60000);
+    CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+
+    string res = ReadFileU8(resFile);
+    if (res.size() >= 3 && (unsigned char)res[0] == 0xEF && (unsigned char)res[1] == 0xBB) res = res.substr(3);  // 去 BOM
+    if (res.empty()) { err = "Excel 无响应（可能未安装 Excel/WPS 或被占用）"; return false; }
+    JP j = JParser(res).Parse();
+    bool ok = j && j->t == JVal::OBJ ? j->truthy("ok") : false;
+    if (ok) {
+        auto rr = j->get("row");
+        outRow = (rr && rr->t == JVal::NUM) ? (int)rr->n : 0;
+        return true;
+    }
+    err = (j && j->t == JVal::OBJ) ? j->str("error", "写入失败") : "写入失败";
+    return false;
+}
+
+// ==================== 选择 Excel ====================
+static wstring PickLedgerFile(HWND owner) {
+    wchar_t buf[MAX_PATH]{};
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = owner;
+    ofn.lpstrFilter = L"Excel 台账 (*.xlsx;*.xlsm)\0*.xlsx;*.xlsm\0所有文件 (*.*)\0*.*\0";
+    ofn.lpstrFile = buf;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrTitle = L"选择要写入的 Excel 台账（13 列：序号/类型/推文名称/…/审核）";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+    if (!GetOpenFileNameW(&ofn)) return L"";
+    return buf;
+}
+
 // ==================== 入口 ====================
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     KLog("kernel start");
@@ -490,6 +605,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     g_webDir = PathJoin(g_exeDir, L"web");
 
     LoadConfig();
+    if (g_cfg.ledgerPath.empty() || !FileExists(g_cfg.ledgerPath)) {
+        wstring picked = PickLedgerFile(nullptr);
+        if (!picked.empty()) { g_cfg.ledgerPath = picked; SaveConfig(); KLog("ledger picked: " + w2u(picked)); }
+        else KLog("ledger not picked");
+    }
     LoadList(PoolFile(), g_pool);
     LoadList(LedgerFile(), g_ledger);
     bool sq = LoadSqlite();

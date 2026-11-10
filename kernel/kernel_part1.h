@@ -232,6 +232,7 @@ struct Item {
     string id, url, title, account, date, type, theme;
     string writer, layout, photo, review, art, secretary;
     string source, created;
+    string seqValue;
     bool written = false;
     string wsheet; int wrow = 0;
     string Get(const string& k) const {
@@ -240,6 +241,7 @@ struct Item {
         if (k=="theme") return theme; if (k=="writer") return writer; if (k=="layout") return layout;
         if (k=="photo") return photo; if (k=="review") return review; if (k=="art") return art;
         if (k=="secretary") return secretary; if (k=="source") return source; if (k=="created") return created;
+        if (k=="seq") return seqValue;
         return "";
     }
     void Set(const string& k, const string& v) {

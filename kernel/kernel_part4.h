@@ -1,5 +1,6 @@
 
 static string ApiLive();   // 实现在 part5
+static wstring PickLedgerFile(HWND owner);   // 实现在 part5
 
 // ==================== 静态文件 ====================
 static string ContentTypeOf(const string& name) {
@@ -207,7 +208,11 @@ static string ApiPoolWrite(const string& body) {
         if (arr && arr->t == JVal::ARR) { hasIds = true; for (auto& e : arr->arr) if (e && e->t == JVal::STR) ids.insert(e->s); }
     }
     bool fillSlash = (j && j->t == JVal::OBJ) ? j->truthy("fillSlash") : false;
+    string mode = (j && j->t == JVal::OBJ) ? j->str("mode", "append") : "append";
+    int startRow = 0;
+    { auto rr = (j && j->t == JVal::OBJ) ? j->get("row") : nullptr; if (rr && rr->t == JVal::NUM) startRow = (int)rr->n; }
     int written = 0, skipped = 0;
+    string lastErr;
     lock_guard<mutex> lk(g_mu);
     for (auto& it : g_pool) {
         if (it.written) continue;
@@ -228,13 +233,13 @@ static string ApiPoolWrite(const string& body) {
             if (bad) { ++skipped; continue; }
         }
         string err;
-        if (AppendToLedger(v, err)) { it.written = true; ++written; }
-        else ++skipped;
+        if (AppendToLedger(v, err, mode, startRow)) { it.written = true; ++written; }
+        else { ++skipped; if (!err.empty() && err != "资料不全") lastErr = err; }
     }
     SaveList(PoolFile(), g_pool);
     return "{\"ok\":" + string(written > 0 ? "true" : "false") + ",\"written\":" + to_string(written) +
            ",\"skipped\":" + to_string(skipped) + ",\"error\":" +
-           JStr(written == 0 ? "没有可写入的条目（多半是资料不全）" : "") + "}";
+           JStr(written == 0 ? (lastErr.empty() ? "没有可写入的条目（多半是资料不全）" : lastErr) : "") + "}";
 }
 
 static string ApiAppend(const string& body) {
@@ -247,9 +252,15 @@ static string ApiAppend(const string& body) {
         auto v = vals->get(kKeys[i]);
         if (v && v->t == JVal::STR) it.Set(kKeys[i], v->s);
     }
+    string wmode = j->str("mode", "append");
+    int wrow = 0;
+    { auto rr = j->get("row"); if (rr && rr->t == JVal::NUM) wrow = (int)rr->n; }
     string err;
-    if (!AppendToLedger(it, err)) return "{\"ok\":false,\"error\":\"还有必填项没填\"}";
-    return "{\"ok\":true,\"sheet\":\"\",\"row\":" + to_string((int)g_ledger.size() + 1) + ",\"seq\":" + to_string((int)g_ledger.size()) + "}";
+    if (!AppendToLedger(it, err, wmode, wrow)) return "{\"ok\":false,\"error\":" + JStr(err.empty() ? "写入失败" : err) + "}";
+    int realRow = g_ledger.empty() ? 0 : g_ledger.back().wrow;
+    int realSeq = g_ledger.empty() ? 0 : atoi(g_ledger.back().Get("seq").c_str());
+    return "{\"ok\":true,\"sheet\":" + JStr(YearMonthOf(it.date)) + ",\"row\":" + to_string(realRow) +
+           ",\"seq\":" + to_string(realSeq) + "}";
 }
 
 static string ApiConfig(const string& body) {
@@ -314,14 +325,31 @@ static string HandleApi(const string& method, const string& rawPath, const strin
     if (path == "/api/pool/fetch") return ApiExtract(body);
     if (path == "/api/append") return ApiAppend(body);
     if (path == "/api/config") return ApiConfig(body);
-    if (path == "/api/pick-folder" || path == "/api/pick-file") return ApiPickFolder();
+    if (path == "/api/pick-folder") return ApiPickFolder();
+    if (path == "/api/pick-file") {
+        wstring picked = PickLedgerFile(g_floater);
+        if (picked.empty()) return "{\"ok\":false,\"cancelled\":true}";
+        lock_guard<mutex> lk(g_mu);
+        g_cfg.ledgerPath = picked;
+        SaveConfig();
+        return "{\"ok\":true,\"workbook\":" + JStr(w2u(picked)) + "}";
+    }
     if (path == "/api/open-file") {
         ShellExecuteW(nullptr, L"open", LedgerXlsx().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         return "{\"ok\":true}";
     }
     if (path == "/api/floating/start" || path == "/api/floating/stop")
         return "{\"ok\":false,\"error\":\"悬浮窗已取消，请用「动态识别」页\"}";
-    if (path == "/api/preview") return "{\"ok\":true,\"sheet\":\"\",\"row\":" + to_string((int)g_ledger.size() + 2) + ",\"seq\":" + to_string((int)g_ledger.size() + 1) + ",\"occupied\":false}";
+    if (path == "/api/preview") {
+        JP pj = JParser(body).Parse();
+        string date = (pj && pj->t == JVal::OBJ) ? pj->str("date") : "";
+        string ym = YearMonthOf(date);
+        lock_guard<mutex> lk(g_mu);
+        int sameMonth = 0;
+        for (auto& r : g_ledger) if (YearMonthOf(r.date) == ym) ++sameMonth;
+        return "{\"ok\":true,\"sheet\":" + JStr(ym) + ",\"row\":" + to_string(sameMonth + 3) +
+               ",\"seq\":" + to_string(sameMonth + 1) + ",\"occupied\":false}";
+    }
     if (path == "/api/undo") return "{\"ok\":false,\"error\":\"暂不支持撤销\"}";
     return "{\"ok\":false,\"error\":\"unknown api\"}";
 }
