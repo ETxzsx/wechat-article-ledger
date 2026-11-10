@@ -153,6 +153,24 @@ GET  /api/ping
 
 **只在 Windows 上验证过**（tkinter 悬浮窗 + 中文 Excel 字体）。
 
+
+
+## 自动记录器（C++ 版 · 全电脑）
+
+双击 `启动监控.cmd`，打开即自动监控**全电脑**的公众号链接，无需任何手动操作：
+
+- **浏览器历史**：Chrome / Edge / Brave / 360 / QQ浏览器 / 360Chrome 的 History，以及 Firefox 的 places.sqlite —— 浏览器里打开公众号文章，历史一更新就自动记录。
+- **全局剪贴板**：任何程序（微信客户端、浏览器、任意地方）复制了公众号链接，立即记录，并尝试抓取文章标题。
+
+记录写入 `cpp\data\wechat_links.csv`（UTF-8，含时间/标题/链接/来源）和 `wechat_links.jsonl`，同一篇文章自动去重不重复记。
+
+**实现要点**：
+- 纯 C++（MSVC 编译），零外部依赖 —— SQLite 用 Windows 自带 `winsqlite3.dll` 动态加载，标题用 WinHTTP 抓取。
+- 内存/资源治理：所有句柄（SQLite/WinHTTP/剪贴板）RAII 自动释放；标题抓取带缓存（同篇不重复请求）；记录批量落盘减少 IO；Ctrl+C 优雅退出（flush 缓冲 + 关文件）。
+- 微信 PC 客户端里文章存在加密数据库、链接不对外暴露，只能靠「复制链接」触发记录（剪贴板监听自动兜底）。
+
+源码：`cpp\wechat_link_watcher.cpp`，编译脚本 `cpp\build.bat`。
+
 ## License
 
 MIT

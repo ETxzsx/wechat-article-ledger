@@ -10,3 +10,6 @@ logs/
 *.tmp
 .DS_Store
 Thumbs.db
+cpp/*.exe
+cpp/*.obj
+cpp/data/
