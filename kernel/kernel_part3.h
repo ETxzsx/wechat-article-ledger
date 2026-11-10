@@ -6,6 +6,7 @@ struct Config {
     wstring ledgerPath;      // 用户选择的 Excel 台账
 };
 static Config g_cfg;
+static mutex g_excelMu;   // 串行化 Excel 写入（COM 单实例）
 static HWND g_floater = nullptr;
 static bool g_floaterExpanded = false;
 
@@ -160,36 +161,43 @@ static bool ExcelWriteRow(const wstring& xlsx, const string& sheet, const string
                           const vector<string>& values, string& err, int& outRow);   // 实现在 part5
 
 // ==================== 写台账 ====================
-static bool AppendToLedger(const Item& it, string& err, const string& mode = "append", int row = 0) {
+static bool AppendToLedger(Item it, string& err, const string& mode = "append", int row = 0) {
+    if (!FileExists(LedgerXlsx())) { err = "未选择台账 Excel，请先点「换一个文件」选择"; return false; }
     vector<string> miss;
     for (int i = 0; i < 13; ++i) {
         if (IsRequired(kKeys[i]) && it.Get(kKeys[i]).empty()) miss.push_back(kHeads[i]);
     }
-    if (!miss.empty()) {
-        err = "资料不全";
-        return false;
-    }
+    if (!miss.empty()) { err = "资料不全"; return false; }
     vector<string> vals;
     for (int i = 0; i < 13; ++i) vals.push_back(it.Get(kKeys[i]));
-    int sameMonth = 0;
-    string ym = YearMonthOf(it.date);
-    for (auto& r : g_ledger) if (YearMonthOf(r.date) == ym) ++sameMonth;
-    if (!vals.empty() && vals[0].empty()) vals[0] = to_string(sameMonth + 1);
+    int seq = 1;
+    {
+        lock_guard<mutex> lk(g_mu);
+        int sameMonth = 0; string ym = YearMonthOf(it.date);
+        for (auto& r : g_ledger) if (YearMonthOf(r.date) == ym) ++sameMonth;
+        seq = sameMonth + 1;
+    }
+    vals[0] = to_string(seq);
 
     int outRow = 0;
     string wErr;
-    bool ok = ExcelWriteRow(LedgerXlsx(), YearMonthOf(it.date), mode, row, vals, wErr, outRow);
-    if (!ok) {
-        KLog("excel write failed: " + wErr);
-        err = wErr;
-        return false;
+    {
+        lock_guard<mutex> el(g_excelMu);   // COM 单实例，必须串行
+        if (!ExcelWriteRow(LedgerXlsx(), YearMonthOf(it.date), mode, row, vals, wErr, outRow)) {
+            KLog("excel write failed: " + wErr);
+            err = wErr;
+            return false;
+        }
     }
-    Item rec = it;
-    rec.seqValue = vals[0];
-    rec.wsheet = YearMonthOf(rec.date); rec.wrow = outRow;
-    g_ledger.push_back(rec);
-    g_ledger.back().written = true;
-    SaveList(LedgerFile(), g_ledger);
+    {
+        lock_guard<mutex> lk(g_mu);
+        Item rec = it;
+        rec.seqValue = vals[0];
+        rec.wsheet = YearMonthOf(rec.date); rec.wrow = outRow;
+        rec.written = true;
+        g_ledger.push_back(rec);
+        SaveList(LedgerFile(), g_ledger);
+    }
     KLog("ledger appended to excel row=" + to_string(outRow));
     return true;
 }

@@ -664,6 +664,7 @@ struct Config {
     wstring ledgerPath;      // 用户选择的 Excel 台账
 };
 static Config g_cfg;
+static mutex g_excelMu;   // 串行化 Excel 写入（COM 单实例）
 static HWND g_floater = nullptr;
 static bool g_floaterExpanded = false;
 
@@ -818,36 +819,43 @@ static bool ExcelWriteRow(const wstring& xlsx, const string& sheet, const string
                           const vector<string>& values, string& err, int& outRow);   // 实现在 part5
 
 // ==================== 写台账 ====================
-static bool AppendToLedger(const Item& it, string& err, const string& mode = "append", int row = 0) {
+static bool AppendToLedger(Item it, string& err, const string& mode = "append", int row = 0) {
+    if (!FileExists(LedgerXlsx())) { err = "未选择台账 Excel，请先点「换一个文件」选择"; return false; }
     vector<string> miss;
     for (int i = 0; i < 13; ++i) {
         if (IsRequired(kKeys[i]) && it.Get(kKeys[i]).empty()) miss.push_back(kHeads[i]);
     }
-    if (!miss.empty()) {
-        err = "资料不全";
-        return false;
-    }
+    if (!miss.empty()) { err = "资料不全"; return false; }
     vector<string> vals;
     for (int i = 0; i < 13; ++i) vals.push_back(it.Get(kKeys[i]));
-    int sameMonth = 0;
-    string ym = YearMonthOf(it.date);
-    for (auto& r : g_ledger) if (YearMonthOf(r.date) == ym) ++sameMonth;
-    if (!vals.empty() && vals[0].empty()) vals[0] = to_string(sameMonth + 1);
+    int seq = 1;
+    {
+        lock_guard<mutex> lk(g_mu);
+        int sameMonth = 0; string ym = YearMonthOf(it.date);
+        for (auto& r : g_ledger) if (YearMonthOf(r.date) == ym) ++sameMonth;
+        seq = sameMonth + 1;
+    }
+    vals[0] = to_string(seq);
 
     int outRow = 0;
     string wErr;
-    bool ok = ExcelWriteRow(LedgerXlsx(), YearMonthOf(it.date), mode, row, vals, wErr, outRow);
-    if (!ok) {
-        KLog("excel write failed: " + wErr);
-        err = wErr;
-        return false;
+    {
+        lock_guard<mutex> el(g_excelMu);   // COM 单实例，必须串行
+        if (!ExcelWriteRow(LedgerXlsx(), YearMonthOf(it.date), mode, row, vals, wErr, outRow)) {
+            KLog("excel write failed: " + wErr);
+            err = wErr;
+            return false;
+        }
     }
-    Item rec = it;
-    rec.seqValue = vals[0];
-    rec.wsheet = YearMonthOf(rec.date); rec.wrow = outRow;
-    g_ledger.push_back(rec);
-    g_ledger.back().written = true;
-    SaveList(LedgerFile(), g_ledger);
+    {
+        lock_guard<mutex> lk(g_mu);
+        Item rec = it;
+        rec.seqValue = vals[0];
+        rec.wsheet = YearMonthOf(rec.date); rec.wrow = outRow;
+        rec.written = true;
+        g_ledger.push_back(rec);
+        SaveList(LedgerFile(), g_ledger);
+    }
     KLog("ledger appended to excel row=" + to_string(outRow));
     return true;
 }
@@ -897,7 +905,9 @@ static string PathOnly(const string& path) {
 // ==================== API ====================
 static string ApiState() {
     lock_guard<mutex> lk(g_mu);
-    string s = "{\"workbook\":" + JStr(w2u(LedgerXlsx())) + ",\"exists\":true,\"note\":\"\"";
+    bool hasLedger = !g_cfg.ledgerPath.empty() && FileExists(g_cfg.ledgerPath);
+    string s = "{\"workbook\":" + JStr(w2u(LedgerXlsx())) + ",\"exists\":" + (hasLedger ? "true" : "false") +
+               ",\"hasLedger\":" + (hasLedger ? "true" : "false") + ",\"note\":\"\"";
     s += ",\"fields\":[";
     for (int i = 0; i < 13; ++i) {
         if (i) s += ",";
@@ -1065,44 +1075,57 @@ static string ApiPoolWrite(const string& body) {
     string mode = (j && j->t == JVal::OBJ) ? j->str("mode", "append") : "append";
     int startRow = 0;
     { auto rr = (j && j->t == JVal::OBJ) ? j->get("row") : nullptr; if (rr && rr->t == JVal::NUM) startRow = (int)rr->n; }
-    int written = 0, skipped = 0, noDate = 0;
-    string lastErr;
-    lock_guard<mutex> lk(g_mu);
-    for (auto& it : g_pool) {
-        if (it.written) continue;
-        if (hasIds && !ids.count(it.id)) continue;
-        Item v = it;
-        bool bad = false;
-        for (int i = 0; i < 13; ++i) {
-            if (IsRequired(kKeys[i]) && v.Get(kKeys[i]).empty()) { bad = true; break; }
-        }
-        // 发布时间决定写进哪张月表，缺了只能跳过
-        if (v.Get("date").empty()) { ++noDate; ++skipped; continue; }
-        if (bad) {
-            if (!fillSlash) { ++skipped; continue; }
-            if (v.Get("theme").empty()) v.Set("theme", GuessTheme(v.Get("title")));
-            for (int i = 0; i < 13; ++i) {
-                const string k = kKeys[i];
-                if (k == "title" || k == "url" || k == "date") continue;
-                if (v.Get(k).empty()) v.Set(k, "/");
+
+    if (!FileExists(LedgerXlsx())) return "{\"ok\":false,\"written\":0,\"skipped\":0,\"error\":\"未选择台账 Excel，请先点「换一个文件」选择\"}";
+
+    // 快照待写条目（纯内存，持锁；缺日期/缺标题的单独统计）
+    vector<Item> todo;
+    int noDate = 0, incomplete = 0;
+    {
+        lock_guard<mutex> lk(g_mu);
+        for (auto& it : g_pool) {
+            if (it.written) continue;
+            if (hasIds && !ids.count(it.id)) continue;
+            Item v = it;
+            if (v.Get("date").empty()) { ++noDate; continue; }
+            bool bad = false;
+            for (int i = 0; i < 13; ++i) if (IsRequired(kKeys[i]) && v.Get(kKeys[i]).empty()) { bad = true; break; }
+            if (bad) {
+                if (!fillSlash) { ++incomplete; continue; }
+                if (v.Get("theme").empty()) v.Set("theme", GuessTheme(v.Get("title")));
+                if (v.Get("type").empty()) v.Set("type", "推文");
+                for (int i = 0; i < 13; ++i) {
+                    const string k = kKeys[i];
+                    if (k == "title" || k == "url" || k == "date" || k == "type" || k == "theme") continue;
+                    if (v.Get(k).empty()) v.Set(k, "/");
+                }
+                if (v.Get("title").empty() || v.Get("url").empty()) { ++incomplete; continue; }
             }
-            for (int i = 0; i < 13; ++i) {
-                if (kKeys[i][0] == 't' && string(kKeys[i]) == "type" && v.Get("type").empty()) { bad = true; break; }
-            }
-            if (v.Get("type").empty()) v.Set("type", "推文");
-            if (v.Get("title").empty() || v.Get("url").empty()) { ++skipped; continue; }
+            todo.push_back(v);
         }
-        string err;
-        if (AppendToLedger(v, err, mode, startRow)) { it.written = true; ++written; }
-        else { ++skipped; if (!err.empty() && err != "资料不全") lastErr = err; }
     }
-    SaveList(PoolFile(), g_pool);
+
+    int written = 0;
+    string lastErr;
+    for (auto& v : todo) {
+        string err;
+        if (AppendToLedger(v, err, mode, startRow)) {
+            ++written;
+            lock_guard<mutex> lk(g_mu);
+            for (auto& it : g_pool) if (it.id == v.id) { it.written = true; break; }
+        } else if (!err.empty() && err != "资料不全") lastErr = err;
+    }
+    { lock_guard<mutex> lk(g_mu); SaveList(PoolFile(), g_pool); }
+
+    int skipped = noDate + incomplete + ((int)todo.size() - written);
+    string e;
+    if (written == 0) {
+        if (!lastErr.empty()) e = lastErr;
+        else if (noDate > 0) e = "有 " + to_string(noDate) + " 条缺「发布时间」（它决定写进哪张月表），请补上或勾选「缺失项自动填 /」后重试";
+        else e = "没有可写入的条目：请勾选「缺失项自动填 /」或手动补全字段";
+    }
     return "{\"ok\":" + string(written > 0 ? "true" : "false") + ",\"written\":" + to_string(written) +
-           ",\"skipped\":" + to_string(skipped) + ",\"error\":" +
-           JStr(written == 0
-                ? (noDate > 0 ? ("有 " + to_string(noDate) + " 条缺「发布时间」，发布时间决定写进哪张月表，请先补上再写入")
-                              : (lastErr.empty() ? "没有可写入的条目，请检查是否勾选条目或补全字段" : lastErr))
-                : (skipped > 0 ? ("已写入 " + to_string(written) + " 条，跳过 " + to_string(skipped) + " 条（缺发布时间或标题）") : "")) + "}";
+           ",\"skipped\":" + to_string(skipped) + ",\"error\":" + JStr(e) + "}";
 }
 
 static string ApiAppend(const string& body) {
@@ -1120,6 +1143,7 @@ static string ApiAppend(const string& body) {
     { auto rr = j->get("row"); if (rr && rr->t == JVal::NUM) wrow = (int)rr->n; }
     string err;
     if (!AppendToLedger(it, err, wmode, wrow)) return "{\"ok\":false,\"error\":" + JStr(err.empty() ? "写入失败" : err) + "}";
+    if (g_ledger.empty()) return "{\"ok\":false,\"error\":\"写入失败\"}";
     int realRow = g_ledger.empty() ? 0 : g_ledger.back().wrow;
     int realSeq = g_ledger.empty() ? 0 : atoi(g_ledger.back().Get("seq").c_str());
     return "{\"ok\":true,\"sheet\":" + JStr(YearMonthOf(it.date)) + ",\"row\":" + to_string(realRow) +
@@ -1834,21 +1858,6 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     g_webDir = PathJoin(g_exeDir, L"web");
 
     LoadConfig();
-    // 选文件放到后台线程：对话框是模态的，不能挡住服务/窗口/监听的启动
-    thread([]() {
-        if (g_cfg.ledgerPath.empty() || !FileExists(g_cfg.ledgerPath)) {
-            KLog("ask for ledger file (background)");
-            wstring picked = PickLedgerFile(nullptr);
-            if (!picked.empty()) {
-                lock_guard<mutex> lk(g_mu);
-                g_cfg.ledgerPath = picked;
-                SaveConfig();
-                KLog("ledger picked: " + w2u(picked));
-            } else {
-                KLog("ledger not picked");
-            }
-        }
-    }).detach();
     LoadList(PoolFile(), g_pool);
     LoadList(LedgerFile(), g_ledger);
     bool sq = LoadSqlite();
