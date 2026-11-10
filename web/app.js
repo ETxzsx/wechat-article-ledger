@@ -89,7 +89,7 @@ function yearMonth(dateStr) {
 
 function setView(name) {
   S.view = name;
-  ["live", "entry", "pool", "ledger"].forEach((v) => {
+  ["live", "entry", "ledger"].forEach((v) => {
     $("view-" + v).classList.toggle("hidden", v !== name);
   });
   document.querySelectorAll(".view-btn").forEach((b) => {
@@ -97,7 +97,6 @@ function setView(name) {
   });
   if (name === "live") startLive();
   else stopLive();
-  if (name === "pool") loadPool();
   if (name === "ledger") loadRows();
 }
 
@@ -234,7 +233,6 @@ async function boot() {
   }
   refresh();
   applyMode();
-  updatePoolBadge(st.poolPending || 0);
   startLive();
 }
 
@@ -908,7 +906,6 @@ function bind() {
     const r = await api("/api/open-file", {});
     if (!r.ok) toast(r.error || "打不开文件", true);
   });
-  $("btn-float").addEventListener("click", () => toast("悬浮窗已取消，请用「动态识别」页"));
   $("btn-live-refresh").addEventListener("click", loadLive);
   $("btn-live-clear").addEventListener("click", () => {
     S.liveItems = [];
@@ -916,37 +913,8 @@ function bind() {
     toast("已清空显示（内核会记住已识别的链接，不重复弹出）");
   });
 
-  $("btn-grab").addEventListener("click", importPaste);
-  $("paste").addEventListener("keydown", (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); importPaste(); }
-  });
-  $("btn-file").addEventListener("click", () => $("file").click());
-  $("file").addEventListener("change", (e) => {
-    const f = e.target.files && e.target.files[0];
-    if (f) importFile(f);
-    e.target.value = "";
-  });
-  $("chk-all").addEventListener("change", (e) => {
-    S.selected.clear();
-    if (e.target.checked) S.pool.filter((i) => !i.written).forEach((i) => S.selected.add(i.id));
-    renderPool();
-  });
-  $("btn-write-all").addEventListener("click", () => writePool(null));
-  $("btn-write-sel").addEventListener("click", () => writePool([...S.selected]));
-  $("btn-remove-sel").addEventListener("click", async () => {
-    const ids = [...S.selected];
-    if (!ids.length) { toast("先勾选要删的", true); return; }
-    await api("/api/pool/remove", { ids });
-    S.selected.clear();
-    loadPool();
-  });
-  $("btn-clear").addEventListener("click", async () => {
-    await api("/api/pool/clear", { all: false });
-    loadPool();
-  });
-
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && S.editing) { S.editing = null; renderPool(); }
+    if (e.key === "Escape" && S.editing) { S.editing = null; }
   });
 }
 

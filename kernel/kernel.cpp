@@ -1256,16 +1256,8 @@ static string HandleApi(const string& method, const string& rawPath, const strin
     if (path == "/api/live") return ApiLive();
     if (path == "/api/quick-write") return ApiQuickWrite(body);
     if (path == "/api/rows") return ApiRows();
-    if (path == "/api/pool") return ApiPool();
     if (path == "/api/ping") return "{\"ok\":true,\"pending\":" + to_string(PendingCount()) + "}";
     if (path == "/api/parse") return ApiParse(body);
-    if (path == "/api/capture") return ApiCapture(body);
-    if (path == "/api/urls/extract") return ApiExtract(body);
-    if (path == "/api/pool/remove") return ApiPoolRemove(body);
-    if (path == "/api/pool/clear") return ApiPoolClear(body);
-    if (path == "/api/pool/update") return ApiPoolUpdate(body);
-    if (path == "/api/pool/write") return ApiPoolWrite(body);
-    if (path == "/api/pool/fetch") return ApiExtract(body);
     if (path == "/api/append") return ApiAppend(body);
     if (path == "/api/config") return ApiConfig(body);
     if (path == "/api/pick-folder") return ApiPickFolder();
@@ -1281,8 +1273,6 @@ static string HandleApi(const string& method, const string& rawPath, const strin
         ShellExecuteW(nullptr, L"open", LedgerXlsx().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         return "{\"ok\":true}";
     }
-    if (path == "/api/floating/start" || path == "/api/floating/stop")
-        return "{\"ok\":false,\"error\":\"悬浮窗已取消，请用「动态识别」页\"}";
     if (path == "/api/preview") {
         JP pj = JParser(body).Parse();
         string date = (pj && pj->t == JVal::OBJ) ? pj->str("date") : "";

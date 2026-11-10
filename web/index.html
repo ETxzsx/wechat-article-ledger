@@ -32,7 +32,6 @@
   <nav class="views">
     <button class="view-btn on" data-view="live" type="button">动态识别<span id="live-count" class="vcount hidden">0</span></button>
     <button class="view-btn" data-view="entry" type="button">单条录入</button>
-    <button class="view-btn" data-view="pool" type="button">链接池<span id="pool-count" class="vcount hidden">0</span></button>
     <button class="view-btn" data-view="ledger" type="button">台账明细</button>
   </nav>
 
@@ -136,60 +135,6 @@
   </main>
 
   <!-- ======================= 链接池 ======================= -->
-  <main id="view-pool" class="view hidden">
-    <section class="import">
-      <div class="step-label">导入链接</div>
-      <div class="import-grid">
-        <div class="import-paste">
-          <textarea id="paste" spellcheck="false" placeholder="把一堆链接直接粘进来——换行、空格、逗号、引号混在一起也能自动分开，重复的会去掉。&#10;&#10;https://mp.weixin.qq.com/s/…&#10;https://mp.weixin.qq.com/s/…"></textarea>
-          <div class="import-actions">
-            <button id="btn-grab" class="btn btn-seal" type="button">识别并抓取</button>
-            <button id="btn-file" class="btn" type="button">导入表格 / 文本</button>
-            <input id="file" type="file" accept=".xlsx,.xlsm,.csv,.txt,.md,.html,.htm" hidden>
-            <span id="import-hint" class="hint"></span>
-          </div>
-        </div>
-        <aside class="import-side">
-          <p><b>Excel</b>（.xlsx / .xlsm）：整张表逐单元格找公众号链接，不要求哪一列。</p>
-          <p><b>粘贴</b>：一条一行、整段混排都行；同一篇文章的两种链接形式算一条。</p>
-          <p><b>悬浮抓取</b>：桌面圆钮上点「抓取链接」，直接进这个池子。</p>
-          <p><b>抓不到？</b>微信客户端里打开的文章没有地址栏，点文章右上角 ⋯ →「复制链接」再点抓取，等它 20 秒即可。</p>
-          <p><b>抓到旧的？</b>剪贴板里残留的上一篇会被识别出来（标题对不上），自动跳过并提示。</p>
-        </aside>
-      </div>
-      <div id="progress" class="progress hidden">
-        <div class="bar"><i id="bar-fill"></i></div>
-        <span id="progress-text" class="progress-text"></span>
-      </div>
-    </section>
-
-    <section class="pool">
-      <div class="pool-head">
-        <div>
-          <div class="step-label">链接池</div>
-          <p id="pool-sum" class="fillcount">空着</p>
-        </div>
-        <div class="pool-actions">
-          <label class="chk"><input type="checkbox" id="fill-slash" checked> 缺失项自动填「/」</label>
-          <button id="btn-write-sel" class="btn" type="button">写入选中</button>
-          <button id="btn-write-all" class="btn btn-seal" type="button">全部写入</button>
-          <button id="btn-remove-sel" class="linkbtn" type="button">删除选中</button>
-          <button id="btn-clear" class="linkbtn" type="button">清空已写入</button>
-        </div>
-      </div>
-      <div class="pool-table">
-        <div class="pool-row head">
-          <span class="c-chk"><input type="checkbox" id="chk-all"></span>
-          <span class="c-title">推文</span>
-          <span class="c-acc">公众号</span>
-          <span class="c-date">发布时间</span>
-          <span class="c-tag">类型 / 主题</span>
-          <span class="c-state">状态</span>
-        </div>
-        <div id="pool-rows"></div>
-      </div>
-    </section>
-  </main>
 
   <!-- ======================= 台账明细 ======================= -->
   <main id="view-ledger" class="view hidden">
