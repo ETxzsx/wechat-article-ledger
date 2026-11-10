@@ -173,25 +173,32 @@ GET  /api/ping
 
 
 
-## 桌面软件（C++ 记录器 + Java 界面）
+## 桌面软件（C++ 内核 + Java 窗口）
 
-双击 `启动软件.cmd` —— 打开一个桌面窗口，界面与网页版完全一致（同一套 `web/` 页面，JavaFX WebView 渲染）。
+双击 `推文台账.exe` —— 打开桌面窗口，无控制台、无 cmd。
 
-**两个程序合成一个软件**：
+**架构**：C++ 负责全部逻辑（HTTP 服务 8780、文章抓取解析、链接池、写 xlsx、剪贴板监听、配置），Java 只做窗口（JavaFX WebView 渲染界面）。
 
-| 组件 | 角色 |
+### 动态识别（主页面，每秒刷新）
+
+- **浏览器**：打开公众号文章 → 浏览器历史更新 → 1 秒内出现在列表
+- **剪贴板**：任何地方复制文章链接 → **立即**记录（内核监听剪贴板事件，不等轮询）→ 界面 1 秒内显示
+- 每条可点「加入链接池」，补全字段后一键写入台账
+
+### 存储与台账
+
+- 数据目录可改：界面「换一个文件」→ 弹 Windows 目录选择框
+- 台账：`data\推文台账.xlsx`，按发布时间自动分月 sheet（Excel 直接打开）
+
+### 组件
+
+| 文件 | 作用 |
 | --- | --- |
-| `cpp\wechat_link_watcher.exe` | 后台引擎：浏览器历史 + 全局剪贴板自动抓链接（无窗口，日志写 `cpp\data\watcher.log`） |
-| `java\DesktopApp` | 桌面窗口：JavaFX 界面 + 本地服务（端口 8780） |
+| `推文台账.exe` | C++ 内核（服务 + 抓取 + 台账 + 剪贴板监听），启动时拉起窗口 |
+| `java\` | 窗口 UI（内置 JRE + JavaFX，无需安装） |
+| `web\` | 界面页面 |
 
-- Java 启动时**自动拉起** C++ 记录器；关闭窗口时**一起退出**（不留孤儿进程）。
-- C++ 每抓到一条链接写入 `cpp\data\wechat_links.jsonl`，Java 每 2 秒增量同步，链接池页面每 3 秒自动刷新 —— 复制链接后 3~5 秒就能在界面里看到。
-- 链接池里可以补字段、批量写入台账；台账落在 `data\frontend\ledger.csv`（Excel 可直接打开）。
-- 单条录入会真实抓取文章（标题/公众号/发布时间/文末署名）。
-
-**技术栈**：C++（MSVC 静态编译，无运行库依赖）+ Java 21（JDK 标准库 `com.sun.net.httpserver` + JavaFX 21，内置 jlink 精简 JRE 与 JavaFX SDK，解压即用，无需安装任何环境）。
-
-源码：`cpp\wechat_link_watcher.cpp`、`java\LedgerFrontend.java`、`java\DesktopApp.java`。
+源码：`kernel\kernel.cpp`、`java\DesktopApp.java`。
 
 ## License
 

@@ -173,6 +173,83 @@ static void HistoryThread() {
     }
 }
 
+static string ReadClipboardText();   // 实现在下面悬浮窗段
+
+// ==================== 动态识别（浏览器历史 + 剪贴板，1 秒刷新） ====================
+struct LiveItem { string time, source, url, title; bool autoScanned; };
+static vector<LiveItem> g_live;
+static set<string> g_liveSeen;
+static mutex g_liveMu;
+
+static void LiveAdd(const string& url, const string& title, const string& source) {
+    string k = ItemKey(url);
+    if (k.empty() || g_liveSeen.count(k)) return;
+    g_liveSeen.insert(k);
+    LiveItem li{ nowStr(), source, url, title };
+    g_live.insert(g_live.begin(), li);
+    if (g_live.size() > 300) g_live.resize(300);
+    // 没有标题的（剪贴板来源）异步补标题
+    if (title.empty()) {
+        thread([url, k]() {
+            Article a = ParseArticle(HttpGet(url));
+            if (a.title.empty()) return;
+            lock_guard<mutex> lk(g_liveMu);
+            for (auto& it : g_live) if (ItemKey(it.url) == k) it.title = a.title;
+        }).detach();
+    }
+}
+
+static void LiveTick() {
+    // 剪贴板
+    {
+        auto links = ExtractLinks(ReadClipboardText());
+        lock_guard<mutex> lk(g_liveMu);
+        for (auto& u : links) LiveAdd(u, "", "剪贴板");
+    }
+    // 浏览器历史（新出现的）
+    if (s_open) {
+        for (auto& prof : BrowserProfiles()) {
+            sqlite3* db = nullptr;
+            string uri = "file:" + w2u(prof.first) + "?immutable=1";
+            if (s_open(uri.c_str(), &db, 0x1 | 0x40, nullptr) != 0) {
+                uri = "file:" + w2u(prof.first) + "?mode=ro";
+                if (s_open(uri.c_str(), &db, 0x1 | 0x40, nullptr) != 0) continue;
+            }
+            sqlite3_stmt* st = nullptr;
+            if (s_prep(db, "SELECT url,title FROM urls WHERE url LIKE '%mp.weixin.qq.com%' ORDER BY last_visit_time DESC LIMIT 30", -1, &st, nullptr) == 0) {
+                while (s_step(st) == 100) {
+                    string url = s_text(st, 0) ? (const char*)s_text(st, 0) : "";
+                    string title = s_text(st, 1) ? (const char*)s_text(st, 1) : "";
+                    if (url.find("/s/") == string::npos && url.find("/s?") == string::npos) continue;
+                    lock_guard<mutex> lk(g_liveMu);
+                    LiveAdd(url, title, "浏览器");
+                }
+                s_fin(st);
+            }
+            s_close(db);
+        }
+    }
+}
+
+static void LiveThread() {
+    while (true) {
+        LiveTick();
+        this_thread::sleep_for(chrono::milliseconds(1000));
+    }
+}
+
+static string ApiLive() {
+    lock_guard<mutex> lk(g_liveMu);
+    string s = "{\"ok\":true,\"items\":[";
+    for (size_t i = 0; i < g_live.size(); ++i) {
+        if (i) s += ",";
+        s += "{\"time\":" + JStr(g_live[i].time) + ",\"source\":" + JStr(g_live[i].source) +
+             ",\"url\":" + JStr(g_live[i].url) + ",\"title\":" + JStr(g_live[i].title) + "}";
+    }
+    s += "],\"total\":" + to_string(g_live.size()) + "}";
+    return s;
+}
+
 // ==================== 悬浮窗 ====================
 static const wchar_t* kFloaterClass = L"WxLedgerFloater";
 static RECT g_flRect{};
@@ -226,10 +303,9 @@ static void PaintFloater(HWND h, HDC dc) {
     }
 }
 
-static void DoFloaterGrab() {
-    // 读剪贴板，提取链接
+static string ReadClipboardText() {
     string text;
-    if (OpenClipboard(g_floater)) {
+    if (OpenClipboard(nullptr)) {
         HANDLE h = GetClipboardData(CF_UNICODETEXT);
         if (h) {
             wchar_t* p = (wchar_t*)GlobalLock(h);
@@ -237,6 +313,11 @@ static void DoFloaterGrab() {
         }
         CloseClipboard();
     }
+    return text;
+}
+
+static void DoFloaterGrab() {
+    string text = ReadClipboardText();
     auto links = ExtractLinks(text);
     if (links.empty()) {
         MessageBoxW(g_floater, L"剪贴板里没有公众号链接。\n请先在微信里「复制链接」，再点「抓取链接」。",
@@ -253,6 +334,39 @@ static void DoFloaterGrab() {
             SaveList(PoolFile(), g_pool);
         }
     }).detach();
+}
+
+// ==================== 剪贴板事件监听（复制即刻记录） ====================
+static const wchar_t* kClipClass = L"WxLedgerClipListener";
+
+static LRESULT CALLBACK ClipProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (m == WM_CLIPBOARDUPDATE) {
+        string text = ReadClipboardText();
+        auto links = ExtractLinks(text);
+        if (!links.empty()) {
+            lock_guard<mutex> lk(g_liveMu);
+            for (auto& u : links) LiveAdd(u, "", "剪贴板");
+            KLog("clipboard event: " + to_string(links.size()) + " link(s)");
+        }
+        return 0;
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+
+static HWND CreateClipListener() {
+    WNDCLASSEXW wc{ sizeof(wc) };
+    wc.lpfnWndProc = ClipProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = kClipClass;
+    RegisterClassExW(&wc);
+    HWND h = CreateWindowExW(0, kClipClass, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr,
+                             GetModuleHandleW(nullptr), nullptr);
+    if (h && !AddClipboardFormatListener(h)) {
+        KLog("AddClipboardFormatListener failed");
+        return nullptr;
+    }
+    KLog(string("clip listener=") + (h ? "1" : "0"));
+    return h;
 }
 
 static LRESULT CALLBACK FloaterProc(HWND h, UINT m, WPARAM w, LPARAM l) {
@@ -382,11 +496,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     KLog(string("sqlite loaded=") + (sq ? "1" : "0") + " dataDir=" + w2u(g_cfg.dataDir) +
          " pool=" + to_string(g_pool.size()) + " ledger=" + to_string(g_ledger.size()));
 
-    g_floater = CreateFloater();
-    KLog(string("floater=") + (g_floater ? "1" : "0"));
+    CreateClipListener();
 
     thread(ServerThread).detach();
     thread(HistoryThread).detach();
+    thread(LiveThread).detach();
     thread([]() {
         Sleep(600);           // 等服务起来
         LaunchUI();

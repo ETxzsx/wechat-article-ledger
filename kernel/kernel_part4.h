@@ -1,4 +1,6 @@
 
+static string ApiLive();   // 实现在 part5
+
 // ==================== 静态文件 ====================
 static string ContentTypeOf(const string& name) {
     auto end = [&](const char* s) { size_t n = strlen(s); return name.size() >= n && name.compare(name.size() - n, n, s) == 0; };
@@ -68,7 +70,7 @@ static string ApiState() {
     s += ",\"options\":{\"types\":[\"视频\",\"贴图\",\"推文\"],"
          "\"themes\":[\"红日、翱翔、青凝\",\"学院推文\",\"一站式学生社区\",\"学生组织建设\"],"
          "\"accounts\":[],\"people\":[]}";
-    s += ",\"floating\":" + string(g_floater && IsWindowVisible(g_floater) ? "true" : "false");
+    s += ",\"floating\":false";
     s += ",\"poolPending\":" + to_string(PendingCount());
     s += ",\"dataDir\":" + JStr(w2u(g_cfg.dataDir));
     s += "}";
@@ -298,6 +300,7 @@ static string ApiPickFolder() {
 static string HandleApi(const string& method, const string& rawPath, const string& body) {
     string path = PathOnly(rawPath);
     if (path == "/api/state") return ApiState();
+    if (path == "/api/live") return ApiLive();
     if (path == "/api/rows") return ApiRows();
     if (path == "/api/pool") return ApiPool();
     if (path == "/api/ping") return "{\"ok\":true,\"pending\":" + to_string(PendingCount()) + "}";
@@ -316,14 +319,8 @@ static string HandleApi(const string& method, const string& rawPath, const strin
         ShellExecuteW(nullptr, L"open", LedgerXlsx().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         return "{\"ok\":true}";
     }
-    if (path == "/api/floating/start") {
-        if (g_floater) { ShowWindow(g_floater, SW_SHOW); SetWindowPos(g_floater, HWND_TOPMOST, 0,0,0,0, SWP_NOMOVE|SWP_NOSIZE); }
-        return "{\"ok\":true}";
-    }
-    if (path == "/api/floating/stop") {
-        if (g_floater) ShowWindow(g_floater, SW_HIDE);
-        return "{\"ok\":true}";
-    }
+    if (path == "/api/floating/start" || path == "/api/floating/stop")
+        return "{\"ok\":false,\"error\":\"悬浮窗已取消，请用「动态识别」页\"}";
     if (path == "/api/preview") return "{\"ok\":true,\"sheet\":\"\",\"row\":" + to_string((int)g_ledger.size() + 2) + ",\"seq\":" + to_string((int)g_ledger.size() + 1) + ",\"occupied\":false}";
     if (path == "/api/undo") return "{\"ok\":false,\"error\":\"暂不支持撤销\"}";
     return "{\"ok\":false,\"error\":\"unknown api\"}";

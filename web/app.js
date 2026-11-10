@@ -1,6 +1,8 @@
 /* 推文台账 · 前端（单条录入 / 链接池 / 台账明细 / 悬浮模式） */
 const S = {
-  view: "entry",
+  view: "live",
+  liveTimer: null,
+  liveItems: [],
   fields: [],
   options: { types: [], themes: [], accounts: [], people: [] },
   draft: {},
@@ -85,14 +87,98 @@ function yearMonth(dateStr) {
 
 function setView(name) {
   S.view = name;
-  ["entry", "pool", "ledger"].forEach((v) => {
+  ["live", "entry", "pool", "ledger"].forEach((v) => {
     $("view-" + v).classList.toggle("hidden", v !== name);
   });
   document.querySelectorAll(".view-btn").forEach((b) => {
     b.classList.toggle("on", b.dataset.view === name);
   });
+  if (name === "live") startLive();
+  else stopLive();
   if (name === "pool") loadPool();
   if (name === "ledger") loadRows();
+}
+
+/* ================= 动态识别 ================= */
+function startLive() {
+  stopLive();
+  loadLive();
+  S.liveTimer = setInterval(loadLive, 1000);   // 一秒刷新
+}
+function stopLive() {
+  if (S.liveTimer) { clearInterval(S.liveTimer); S.liveTimer = null; }
+}
+async function loadLive() {
+  try {
+    const r = await api("/api/live");
+    if (!r.ok) return;
+    S.liveItems = r.items || [];
+    renderLive(S.liveItems);
+  } catch (e) { /* 忽略瞬时错误 */ }
+}
+function renderLive(items) {
+  const box = $("live-rows");
+  const badge = $("live-count");
+  if (badge) {
+    if (items.length) { badge.textContent = items.length; badge.classList.remove("hidden"); }
+    else badge.classList.add("hidden");
+  }
+  $("live-sum").textContent = items.length
+    ? "已识别 " + items.length + " 条 · 每 1 秒自动刷新（浏览器打开文章 / 复制链接都会出现）"
+    : "等待识别… 浏览器里打开公众号文章、或在任何地方复制文章链接，1 秒内会出现在这里";
+  box.innerHTML = "";
+  if (!items.length) {
+    const p = document.createElement("div");
+    p.className = "pool-empty";
+    p.textContent = "还没有识别到链接。";
+    box.appendChild(p);
+    return;
+  }
+  items.forEach((it) => {
+    const row = document.createElement("div");
+    row.className = "live-row";
+
+    const t = document.createElement("span");
+    t.className = "c-time";
+    t.textContent = (it.time || "").slice(11) || it.time || "";
+
+    const src = document.createElement("span");
+    src.className = "c-src";
+    const isClip = it.source === "剪贴板";
+    const chip = document.createElement("span");
+    chip.className = "chip " + (isClip ? "warn" : "done");
+    chip.textContent = isClip ? "剪贴板" : "浏览器";
+    src.appendChild(chip);
+
+    const main = document.createElement("span");
+    main.className = "c-main";
+    const title = document.createElement("b");
+    title.textContent = it.title || "（未读到标题）";
+    const url = document.createElement("i");
+    url.textContent = it.url;
+    main.appendChild(title);
+    main.appendChild(url);
+
+    const act = document.createElement("span");
+    act.className = "c-act";
+    const btn = document.createElement("button");
+    btn.className = "linkbtn";
+    btn.type = "button";
+    btn.textContent = "加入链接池";
+    btn.onclick = async () => {
+      btn.disabled = true;
+      btn.textContent = "抓取中…";
+      const r = await api("/api/capture", { url: it.url });
+      btn.disabled = false;
+      btn.textContent = r.ok ? "已加入" : "失败";
+      if (r.ok) { updatePoolBadge(r.pending || 0); toast("已加入链接池：" + (it.title || it.url)); }
+      else toast(r.error || "加入失败", true);
+    };
+    act.appendChild(btn);
+
+    row.appendChild(t); row.appendChild(src); row.appendChild(main); row.appendChild(act);
+    box.appendChild(row);
+  });
 }
 
 /* ================= 启动 ================= */
@@ -137,6 +223,7 @@ async function boot() {
   refresh();
   applyMode();
   updatePoolBadge(st.poolPending || 0);
+  startLive();
 }
 
 function renderDatalists() {
@@ -804,7 +891,13 @@ function bind() {
     const r = await api("/api/open-file", {});
     if (!r.ok) toast(r.error || "打不开文件", true);
   });
-  $("btn-float").addEventListener("click", toggleFloating);
+  $("btn-float").addEventListener("click", () => toast("悬浮窗已取消，请用「动态识别」页"));
+  $("btn-live-refresh").addEventListener("click", loadLive);
+  $("btn-live-clear").addEventListener("click", () => {
+    S.liveItems = [];
+    renderLive([]);
+    toast("已清空显示（内核会记住已识别的链接，不重复弹出）");
+  });
 
   $("btn-grab").addEventListener("click", importPaste);
   $("paste").addEventListener("keydown", (e) => {

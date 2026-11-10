@@ -19,25 +19,50 @@
 
   <section class="titleblock">
     <h1>推文台账 · 实时录入</h1>
-    <p class="lede">一条链接自动补齐十三个字段；一堆链接可以整表导入、边抓边核对；要边刷公众号边记，就切到桌面悬浮按钮。</p>
+    <p class="lede">打开公众号文章、或复制文章链接，会自动出现在「动态识别」里（每秒刷新）；一条链接自动补齐十三个字段，核对完一键写进台账。</p>
     <div class="fileline">
       <span class="fl-label">当前台账</span>
       <span id="wb-name" class="fl-name">—</span>
       <button id="btn-pick" class="linkbtn" type="button">换一个文件</button>
       <button id="btn-open" class="linkbtn" type="button">在 Excel 里打开</button>
-      <button id="btn-float" class="linkbtn linkbtn-strong" type="button">进入桌面悬浮模式</button>
     </div>
     <p id="wb-note" class="note hidden"></p>
   </section>
 
   <nav class="views">
-    <button class="view-btn on" data-view="entry" type="button">单条录入</button>
+    <button class="view-btn on" data-view="live" type="button">动态识别<span id="live-count" class="vcount hidden">0</span></button>
+    <button class="view-btn" data-view="entry" type="button">单条录入</button>
     <button class="view-btn" data-view="pool" type="button">链接池<span id="pool-count" class="vcount hidden">0</span></button>
     <button class="view-btn" data-view="ledger" type="button">台账明细</button>
   </nav>
 
+  <!-- ======================= 动态识别 ======================= -->
+  <main id="view-live" class="view">
+    <section class="live">
+      <div class="live-head">
+        <div>
+          <div class="step-label">动态识别 · 每 1 秒自动刷新</div>
+          <p class="fillcount" id="live-sum">浏览器里打开公众号文章、或在任何地方复制文章链接，都会在 1 秒内出现在这里</p>
+        </div>
+        <div class="live-actions">
+          <button id="btn-live-refresh" class="btn" type="button">立即刷新</button>
+          <button id="btn-live-clear" class="linkbtn" type="button">清空列表</button>
+        </div>
+      </div>
+      <div class="live-table">
+        <div class="live-row live-head-row">
+          <span class="c-time">时间</span>
+          <span class="c-src">来源</span>
+          <span class="c-main">标题 / 链接</span>
+          <span class="c-act">操作</span>
+        </div>
+        <div id="live-rows"></div>
+      </div>
+    </section>
+  </main>
+
   <!-- ======================= 单条录入 ======================= -->
-  <main id="view-entry" class="view cols">
+  <main id="view-entry" class="view cols hidden">
     <div class="col-main">
       <section class="step">
         <div class="step-no">一</div>
@@ -184,7 +209,7 @@
     <p class="ledger-hint">表格可以左右拖动查看全部 13 列；要改内容请点「在 Excel 里打开」。</p>
   </main>
 
-  <footer class="colophon">写入前自动备份到 backups/ · 台账在 Excel 中打开时无法写入 · 悬浮按钮常驻桌面最上层</footer>
+  <footer class="colophon">动态识别每秒刷新 · 台账写入 data\推文台账.xlsx · 复制链接立即记录</footer>
 </div>
 
 <div id="toast" class="toast"></div>
