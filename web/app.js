@@ -3,6 +3,7 @@ const S = {
   view: "live",
   liveTimer: null,
   liveItems: [],
+  writtenUrls: new Set(),
   fields: [],
   options: { types: [], themes: [], accounts: [], people: [] },
   draft: {},
@@ -165,15 +166,25 @@ function renderLive(items) {
     const btn = document.createElement("button");
     btn.className = "linkbtn";
     btn.type = "button";
-    btn.textContent = "加入链接池";
+    const done = S.writtenUrls.has(it.url);
+    btn.textContent = done ? "已写入" : "一键写入";
+    if (done) btn.style.color = "var(--muted)";
     btn.onclick = async () => {
+      if (S.writtenUrls.has(it.url)) return;
       btn.disabled = true;
-      btn.textContent = "抓取中…";
-      const r = await api("/api/capture", { url: it.url });
-      btn.disabled = false;
-      btn.textContent = r.ok ? "已加入" : "失败";
-      if (r.ok) { updatePoolBadge(r.pending || 0); toast("已加入链接池：" + (it.title || it.url)); }
-      else toast(r.error || "加入失败", true);
+      btn.textContent = "写入中…";
+      const r = await api("/api/quick-write", { url: it.url });
+      if (r.ok) {
+        S.writtenUrls.add(it.url);
+        btn.disabled = false;
+        btn.textContent = "已写入第" + r.row + "行";
+        btn.style.color = "var(--muted)";
+        toast("已写入「" + (r.title || it.url) + "」第 " + r.row + " 行");
+      } else {
+        btn.disabled = false;
+        btn.textContent = "一键写入";
+        toast(r.error || "写入失败", true);
+      }
     };
     act.appendChild(btn);
 

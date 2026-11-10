@@ -1,4 +1,59 @@
 
+static string TodayCn() {
+    time_t t = time(nullptr); tm tmv{}; localtime_s(&tmv, &t);
+    char b[64]; snprintf(b, sizeof(b), "%d年%d月%d日", tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday);
+    return b;
+}
+
+// 一键写入：抓取解析 + 直接写 Excel；未获取到的字段留空
+static string ApiQuickWrite(const string& body) {
+    JP j = JParser(body).Parse();
+    string url = (j && j->t == JVal::OBJ) ? j->str("url") : "";
+    if (url.empty()) return "{\"ok\":false,\"error\":\"没有链接\"}";
+    if (!FileExists(LedgerXlsx())) return "{\"ok\":false,\"error\":\"未选择台账 Excel，请先点「换一个文件」选择\"}";
+
+    Article a = ParseArticle(HttpGet(url));
+    if (a.title.empty()) return "{\"ok\":false,\"error\":\"解析失败（可能遇到微信验证页），请稍后重试\"}";
+
+    Item it;
+    it.id = GenId(); it.url = url; it.title = a.title; it.account = a.account;
+    it.date = a.date.empty() ? TodayCn() : a.date;
+    it.type = a.typeGuess;
+    it.theme = GuessTheme(a.title);
+    auto sig = [&](const char* k) -> string { auto p = a.sigs.find(k); return p == a.sigs.end() ? "" : p->second; };
+    it.writer = sig("writer"); it.layout = sig("layout"); it.photo = sig("photo");
+    it.review = sig("review"); it.art = sig("art"); it.secretary = sig("secretary");
+
+    vector<string> vals(13, "");   // 未获取到的留空
+    for (int i = 0; i < 13; ++i) vals[i] = it.Get(kKeys[i]);
+
+    int seq = 1;
+    {
+        lock_guard<mutex> lk(g_mu);
+        int sameMonth = 0; string ym = YearMonthOf(it.date);
+        for (auto& r : g_ledger) if (YearMonthOf(r.date) == ym) ++sameMonth;
+        seq = sameMonth + 1;
+    }
+    vals[0] = to_string(seq);
+
+    int outRow = 0; string wErr;
+    {
+        lock_guard<mutex> el(g_excelMu);
+        if (!ExcelWriteRow(LedgerXlsx(), YearMonthOf(it.date), "append", 0, vals, wErr, outRow)) {
+            return "{\"ok\":false,\"error\":" + JStr(wErr) + "}";
+        }
+    }
+    {
+        lock_guard<mutex> lk(g_mu);
+        Item rec = it; rec.seqValue = vals[0]; rec.wrow = outRow; rec.written = true;
+        g_ledger.push_back(rec);
+        SaveList(LedgerFile(), g_ledger);
+    }
+    KLog("quick write row=" + to_string(outRow) + " " + it.title);
+    return "{\"ok\":true,\"sheet\":" + JStr(YearMonthOf(it.date)) + ",\"row\":" + to_string(outRow) +
+           ",\"title\":" + JStr(it.title) + "}";
+}
+
 static string ApiLive();   // 实现在 part5
 static wstring PickLedgerFile(HWND owner);   // 实现在 part5
 
@@ -337,6 +392,7 @@ static string HandleApi(const string& method, const string& rawPath, const strin
     string path = PathOnly(rawPath);
     if (path == "/api/state") return ApiState();
     if (path == "/api/live") return ApiLive();
+    if (path == "/api/quick-write") return ApiQuickWrite(body);
     if (path == "/api/rows") return ApiRows();
     if (path == "/api/pool") return ApiPool();
     if (path == "/api/ping") return "{\"ok\":true,\"pending\":" + to_string(PendingCount()) + "}";
