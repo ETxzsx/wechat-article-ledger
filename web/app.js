@@ -831,15 +831,13 @@ async function writePool(ids) {
     row: S.mode === "row" ? S.insertRow : 0,
   });
   if (!r.ok) {
-    const skip = (r.skipped || []).length;
-    toast((r.error || "写入失败") + (skip ? "（" + skip + " 条资料不全被跳过）" : ""), true);
-    if (r.skipped && r.skipped.length) console.warn("skipped", r.skipped);
+    toast(r.error || "写入失败", true);
     loadPool();
     return;
   }
   const ok = r.written || 0;
-  const skip = (r.skipped || []).length;
-  toast("写入 " + ok + " 条" + (skip ? "，跳过 " + skip + " 条（资料不全）" : ""));
+  const skip = typeof r.skipped === "number" ? r.skipped : (r.skipped || []).length;
+  toast("写入 " + ok + " 条" + (skip ? "，跳过 " + skip + " 条（缺发布时间或标题）" : ""));
   S.selected.clear();
   await loadPool();
   await loadRows();

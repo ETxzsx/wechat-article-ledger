@@ -145,17 +145,27 @@ static void ScanHistoryOnce() {
             if (s_open(uri.c_str(), &db, 0x1 | 0x40, nullptr) != 0) continue;
         }
         sqlite3_stmt* st = nullptr;
-        if (s_prep(db, "SELECT url,title FROM urls WHERE url LIKE '%mp.weixin.qq.com%' ORDER BY last_visit_time DESC LIMIT 100", -1, &st, nullptr) == 0) {
+        if (s_prep(db, "SELECT url,title,last_visit_time FROM urls WHERE url LIKE '%mp.weixin.qq.com%' ORDER BY last_visit_time DESC LIMIT 100", -1, &st, nullptr) == 0) {
             while (s_step(st) == 100) {
                 string url = s_text(st, 0) ? (const char*)s_text(st, 0) : "";
                 string title = s_text(st, 1) ? (const char*)s_text(st, 1) : "";
+                string lvtStr = s_text(st, 2) ? (const char*)s_text(st, 2) : "0";
                 if (url.find("/s/") == string::npos && url.find("/s?") == string::npos) continue;
                 lock_guard<mutex> lk(g_mu);
                 if (FindPool(url)) continue;
                 Item it;
                 it.id = GenId(); it.url = url; it.title = title; it.source = prof.second;
                 it.created = nowStr();
-                if (it.type.empty()) it.type = "推文";
+                it.type = "推文";
+                it.theme = GuessTheme(title);
+                // 历史里的访问时间 -> 发布时间（决定写进哪张月表）
+                long long lvt = atoll(lvtStr.c_str());
+                if (lvt > 0) {
+                    time_t t = (time_t)(lvt / 1000000LL - 11644473600LL);
+                    tm tmv{}; localtime_s(&tmv, &t);
+                    char b[64]; snprintf(b, sizeof(b), "%d年%d月%d日", tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday);
+                    it.date = b;
+                }
                 g_pool.push_back(it);
             }
             s_fin(st);

@@ -1065,7 +1065,7 @@ static string ApiPoolWrite(const string& body) {
     string mode = (j && j->t == JVal::OBJ) ? j->str("mode", "append") : "append";
     int startRow = 0;
     { auto rr = (j && j->t == JVal::OBJ) ? j->get("row") : nullptr; if (rr && rr->t == JVal::NUM) startRow = (int)rr->n; }
-    int written = 0, skipped = 0;
+    int written = 0, skipped = 0, noDate = 0;
     string lastErr;
     lock_guard<mutex> lk(g_mu);
     for (auto& it : g_pool) {
@@ -1076,15 +1076,21 @@ static string ApiPoolWrite(const string& body) {
         for (int i = 0; i < 13; ++i) {
             if (IsRequired(kKeys[i]) && v.Get(kKeys[i]).empty()) { bad = true; break; }
         }
+        // 发布时间决定写进哪张月表，缺了只能跳过
+        if (v.Get("date").empty()) { ++noDate; ++skipped; continue; }
         if (bad) {
             if (!fillSlash) { ++skipped; continue; }
+            if (v.Get("theme").empty()) v.Set("theme", GuessTheme(v.Get("title")));
             for (int i = 0; i < 13; ++i) {
-                if (!IsRequired(kKeys[i]) && string(kKeys[i]) != "seq" && v.Get(kKeys[i]).empty()) v.Set(kKeys[i], "/");
+                const string k = kKeys[i];
+                if (k == "title" || k == "url" || k == "date") continue;
+                if (v.Get(k).empty()) v.Set(k, "/");
             }
             for (int i = 0; i < 13; ++i) {
-                if (IsRequired(kKeys[i]) && v.Get(kKeys[i]).empty()) { bad = true; break; }
+                if (kKeys[i][0] == 't' && string(kKeys[i]) == "type" && v.Get("type").empty()) { bad = true; break; }
             }
-            if (bad) { ++skipped; continue; }
+            if (v.Get("type").empty()) v.Set("type", "推文");
+            if (v.Get("title").empty() || v.Get("url").empty()) { ++skipped; continue; }
         }
         string err;
         if (AppendToLedger(v, err, mode, startRow)) { it.written = true; ++written; }
@@ -1093,7 +1099,10 @@ static string ApiPoolWrite(const string& body) {
     SaveList(PoolFile(), g_pool);
     return "{\"ok\":" + string(written > 0 ? "true" : "false") + ",\"written\":" + to_string(written) +
            ",\"skipped\":" + to_string(skipped) + ",\"error\":" +
-           JStr(written == 0 ? (lastErr.empty() ? "没有可写入的条目（多半是资料不全）" : lastErr) : "") + "}";
+           JStr(written == 0
+                ? (noDate > 0 ? ("有 " + to_string(noDate) + " 条缺「发布时间」，发布时间决定写进哪张月表，请先补上再写入")
+                              : (lastErr.empty() ? "没有可写入的条目，请检查是否勾选条目或补全字段" : lastErr))
+                : (skipped > 0 ? ("已写入 " + to_string(written) + " 条，跳过 " + to_string(skipped) + " 条（缺发布时间或标题）") : "")) + "}";
 }
 
 static string ApiAppend(const string& body) {
@@ -1355,17 +1364,27 @@ static void ScanHistoryOnce() {
             if (s_open(uri.c_str(), &db, 0x1 | 0x40, nullptr) != 0) continue;
         }
         sqlite3_stmt* st = nullptr;
-        if (s_prep(db, "SELECT url,title FROM urls WHERE url LIKE '%mp.weixin.qq.com%' ORDER BY last_visit_time DESC LIMIT 100", -1, &st, nullptr) == 0) {
+        if (s_prep(db, "SELECT url,title,last_visit_time FROM urls WHERE url LIKE '%mp.weixin.qq.com%' ORDER BY last_visit_time DESC LIMIT 100", -1, &st, nullptr) == 0) {
             while (s_step(st) == 100) {
                 string url = s_text(st, 0) ? (const char*)s_text(st, 0) : "";
                 string title = s_text(st, 1) ? (const char*)s_text(st, 1) : "";
+                string lvtStr = s_text(st, 2) ? (const char*)s_text(st, 2) : "0";
                 if (url.find("/s/") == string::npos && url.find("/s?") == string::npos) continue;
                 lock_guard<mutex> lk(g_mu);
                 if (FindPool(url)) continue;
                 Item it;
                 it.id = GenId(); it.url = url; it.title = title; it.source = prof.second;
                 it.created = nowStr();
-                if (it.type.empty()) it.type = "推文";
+                it.type = "推文";
+                it.theme = GuessTheme(title);
+                // 历史里的访问时间 -> 发布时间（决定写进哪张月表）
+                long long lvt = atoll(lvtStr.c_str());
+                if (lvt > 0) {
+                    time_t t = (time_t)(lvt / 1000000LL - 11644473600LL);
+                    tm tmv{}; localtime_s(&tmv, &t);
+                    char b[64]; snprintf(b, sizeof(b), "%d年%d月%d日", tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday);
+                    it.date = b;
+                }
                 g_pool.push_back(it);
             }
             s_fin(st);
