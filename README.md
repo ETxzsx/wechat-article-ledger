@@ -171,6 +171,19 @@ GET  /api/ping
 
 源码：`cpp\wechat_link_watcher.cpp`，编译脚本 `cpp\build.bat`。
 
+
+
+## 前端（Java 版）
+
+双击 `启动前端.cmd`，用内置 JRE 起一个本地服务并打开界面 —— **界面与网页版完全一致**（同一套 `web/` 页面），零安装 Java 依赖。
+
+- **链接池**：自动并入 C++ 记录器抓到的链接（读 `cpp\data\wechat_links.jsonl`），也可以手动粘贴/导入链接；点标题可当场补全字段。
+- **单条录入**：粘贴链接自动解析标题、公众号、发布时间、文末署名（Java 实现，HTTP + 正则）。
+- **台账明细**：写入 `data\frontend\ledger.csv`（Excel 可直接打开），序号自动编号。
+- **技术栈**：纯 JDK 21 标准库（`com.sun.net.httpserver`），无第三方依赖；`jlink` 精简 JRE 约 44 MB。
+
+源码：`java\LedgerFrontend.java`。
+
 ## License
 
 MIT

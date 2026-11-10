@@ -13,3 +13,7 @@ Thumbs.db
 cpp/*.exe
 cpp/*.obj
 cpp/data/
+java/jre/
+java/classes/
+java/*.class
+data/frontend/
