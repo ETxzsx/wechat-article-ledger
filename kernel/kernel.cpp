@@ -1834,11 +1834,21 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     g_webDir = PathJoin(g_exeDir, L"web");
 
     LoadConfig();
-    if (g_cfg.ledgerPath.empty() || !FileExists(g_cfg.ledgerPath)) {
-        wstring picked = PickLedgerFile(nullptr);
-        if (!picked.empty()) { g_cfg.ledgerPath = picked; SaveConfig(); KLog("ledger picked: " + w2u(picked)); }
-        else KLog("ledger not picked");
-    }
+    // 选文件放到后台线程：对话框是模态的，不能挡住服务/窗口/监听的启动
+    thread([]() {
+        if (g_cfg.ledgerPath.empty() || !FileExists(g_cfg.ledgerPath)) {
+            KLog("ask for ledger file (background)");
+            wstring picked = PickLedgerFile(nullptr);
+            if (!picked.empty()) {
+                lock_guard<mutex> lk(g_mu);
+                g_cfg.ledgerPath = picked;
+                SaveConfig();
+                KLog("ledger picked: " + w2u(picked));
+            } else {
+                KLog("ledger not picked");
+            }
+        }
+    }).detach();
     LoadList(PoolFile(), g_pool);
     LoadList(LedgerFile(), g_ledger);
     bool sq = LoadSqlite();
