@@ -1,4 +1,4 @@
-__pycache__/
+﻿__pycache__/
 *.py[cod]
 *.pyo
 config.json
@@ -15,6 +15,8 @@ cpp/*.obj
 cpp/data/
 java/jre/
 java/classes/
-java/*.class
-data/frontend/
 java/javafx/
+kernel/*.exe
+kernel/*.obj
+kernel/*.res
+*.exe
